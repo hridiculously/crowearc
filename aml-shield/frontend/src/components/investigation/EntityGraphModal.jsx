@@ -74,6 +74,24 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
   // visible feedback without an alert(). { kind: 'success'|'error', text }
   const [toast, setToast] = useState(null);
 
+  // ── Hub-ring threshold (visual-cleanup PR). Read from manager_settings
+  //    on modal mount; the same value drives both the canvas hub ring
+  //    and the right-panel "Network hub" warning so they always agree.
+  //    Falls back to 5 if the fetch fails — never blocks the canvas.
+  const [hubRingThreshold, setHubRingThreshold] = useState(5);
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/settings/manager')
+      .then(r => {
+        if (cancelled) return;
+        const raw = r.data?.['graph.hub_ring_threshold'];
+        const n = Number(raw);
+        if (Number.isFinite(n) && n >= 1) setHubRingThreshold(n);
+      })
+      .catch(() => { /* default 5 stands */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const fetchParams = useMemo(() => ({
     from: timeWindow?.from || null,
     to:   timeWindow?.to   || null,
@@ -489,6 +507,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             multiSelectMode={multiSelectMode}
             multiSelectedIds={multiSelectNodes}
             showEdgeLabels={showEdgeLabels}
+            hubRingThreshold={hubRingThreshold}
             annotationsByKey={annotations.byTargetKey}
             clusterByNodeId={clusters?.clusterByNodeId || null}
             colorByClusterId={clusters?.colorByClusterId || null}
@@ -526,6 +545,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             onClearSubgraphFilter={() => setSubgraphFilter(null)}
             annotations={annotations}
             onHighlightTypology={handleTypologyHighlight}
+            hubRingThreshold={hubRingThreshold}
           />
         </div>
 

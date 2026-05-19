@@ -19,6 +19,75 @@
 // component is otherwise stateless (just hover labels via the parent's
 // cursor pos state).
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// ─── PRE-PR AUDIT (visual-cleanup pass) ────────────────────────────────────
+// Documented before the visual cleanup PR landed. Captures the state of
+// the canvas layering so future edits don't re-introduce the noise this
+// PR removed.
+//
+// 1) RISK-SCORE BADGE  (REMOVED in this PR.)
+//    Previously: a small filled circle in the upper-right of every node
+//    whose computeRiskScore(node) returned ≥ 55 (or any selected node).
+//    Trigger: `score` from computeRiskScore() — a roll-up over sanctions,
+//    PEP, OFAC, high-risk jurisdiction, hub popularity, alerts.
+//    Draw calls: ctx.arc at (node.x + r - 1, node.y - r + 1) with
+//    riskScoreCanvasColor(score) fill + white stroke; numeric score text
+//    on top at zoom ≥ 1.1. Now retired from the canvas — the numeric
+//    score lives on in the right-panel RiskScoreBar.
+//
+// 2) HUB RING  (THRESHOLD now configurable.)
+//    Previously: hardcoded `node.shared_with_customer_count >= 3`. Now
+//    driven by the `hubRingThreshold` prop (read once on modal mount
+//    from manager_settings key `graph.hub_ring_threshold`, default 5).
+//    Colour `#7C3AED` (violet), stroke 2px at radius r+4. Visible at
+//    globalScale ≥ 0.4.
+//
+// 3) RING-DRAW SEQUENCE (top of drawNode → bottom; later = visually outer):
+//    a. cluster halo  (Part 16 overlay, when showClusters)
+//    b. body fill     (circle / diamond / rounded-square)
+//    c. hub ring      (violet, r+4) — fires on PhaseB CP w/ shared ≥ threshold
+//    d. sanctions ring (red,    r+1) — fires on risk_indicators.sanctions_hit
+//    e. focus halo     (node colour, r+3) — fires on node.is_focus
+//    f. high-risk country ring  (RETIRED in this PR — was dashed orange r+5)
+//    g. pep/sanctions ring      (red or violet, r+1) — node.pep / .sanctions
+//    h. diff status ring        (green/red, r+4) — Part 11 _diffStatus
+//    i. selection ring          (blue, r+7) — selected single click
+//    j. multi-select ring       (amber, r+5) — node in multiSelectedIds
+//    k. annotation pin          (yellow, top-left) — Part 12
+//    l. risk-score badge        (RETIRED in this PR)
+//    The layering puts behavioural / risk signals INSIDE the selection
+//    and multi-select rings on purpose — those interaction signals are
+//    always the outermost cue so the analyst's current focus dominates.
+//
+// 4) ORANGE FILL  (NOW TWO-TIER.)
+//    Previously: a single `if (phaseB && node.is_high_risk_counterparty)
+//    color = '#F97316'` (orange) bundled PEP, sanctions, OFAC and
+//    high-risk jurisdiction into one fill. After this PR, PhaseB CP
+//    fill is:
+//      * `#F97316` orange — PEP / sanctions / OFAC (strong signal)
+//      * `#D97706` amber  — high-risk jurisdiction ONLY (moderate)
+//      * gold (default)   — everything else
+//    Inputs: node.risk_indicators?.{pep,sanctions_hit,high_risk_jurisdiction},
+//            node.ofac_flagged, node.is_high_risk_country (legacy fallback
+//            on customer nodes).
+//
+// 5) SHAPE CHOICE (Phase A vs Phase B).
+//    Previously: phaseB → diamond; everything else (including Phase A
+//    counterparties) → circle. After this PR ALL counterparties render
+//    as diamonds; Phase A (no counterparty_id) get a small grey "?"
+//    badge in the upper-right corner instead of a separate shape. The
+//    per-node Phase check uses `isPhaseBCounterparty(node)` from
+//    graphHelpers (which reads `node.is_counterparty && node.counterparty_id`)
+//    — Phase A = `node.is_counterparty && !node.counterparty_id`.
+//
+// 6) LEGEND  (data-driven, rebuilt in this PR.)
+//    GraphLegend is a static JSX block at the bottom of this file. It
+//    used to render two columns (Node types + Ring indicators) via
+//    LegendDot / LegendRing helpers. After this PR it has THREE sections
+//    (Node types, Ring indicators, Fill colours), each driven by an
+//    inline data array, and uses inline-styled <div> shapes to mirror
+//    the actual canvas shapes (rotated square for diamond, etc.).
+// ═══════════════════════════════════════════════════════════════════════════
 
 import { lazy, Suspense, useEffect, useState } from 'react';
 import {
@@ -26,8 +95,7 @@ import {
 } from 'lucide-react';
 import {
   COLORS, NODE_RADIUS, radiusFor, isPhaseBCounterparty,
-  truncateLabel, fmtVolumeShort, fmtMoney, shouldShowHoverLabel,
-  computeRiskScore, riskScoreCanvasColor
+  truncateLabel, fmtVolumeShort, fmtMoney, shouldShowHoverLabel
 } from './graphHelpers.js';
 import GraphSankeyView from './GraphSankeyView.jsx';
 
@@ -62,6 +130,10 @@ export default function GraphCanvas({
   multiSelectedIds = null,
   // View toggles
   showEdgeLabels = false,
+  // Hub-ring threshold sourced from manager_settings via EntityGraphModal
+  // (key: graph.hub_ring_threshold). The legend reads it too so the
+  // "Network hub (shared by N+)" label always agrees with the actual ring.
+  hubRingThreshold = 5,
   annotationsByKey = null,
   clusterByNodeId = null,
   colorByClusterId = null,
@@ -134,7 +206,7 @@ export default function GraphCanvas({
             backgroundColor="#F8FAFC"
             nodeRelSize={5}
             nodeCanvasObject={(node, ctx, globalScale) =>
-              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId)
+              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId, hubRingThreshold)
             }
             nodePointerAreaPaint={(node, color, ctx) => {
               ctx.fillStyle = color;
@@ -184,7 +256,10 @@ export default function GraphCanvas({
         </Suspense>
       )}
 
-      {/* Hover-following label tooltip. */}
+      {/* Hover-following label tooltip. For counterparties we append a
+          grey identity line so the analyst can tell at-a-glance whether
+          the entity is a verified dedup match (Phase B, counterparty_id
+          present) or a string match that could be a false link. */}
       {hoveredNode && shouldShowHoverLabel(hoveredNode) && (
         <div
           className="absolute pointer-events-none rounded px-2 py-1 text-[11px] font-medium text-navy-900 border border-slate-200 shadow-md"
@@ -196,7 +271,14 @@ export default function GraphCanvas({
             maxWidth: 240
           }}
         >
-          {hoveredNode.label}
+          <div>{hoveredNode.label}</div>
+          {hoveredNode.is_counterparty && (
+            <div className="text-[10px] italic text-slate-500 mt-0.5">
+              {hoveredNode.counterparty_id
+                ? 'Identity: verified entity link'
+                : 'Identity: string-matched (not deduplicated)'}
+            </div>
+          )}
         </div>
       )}
 
@@ -205,7 +287,11 @@ export default function GraphCanvas({
 
       {/* Bottom-left collapsible legend */}
       {data && !isEmpty && (
-        <GraphLegend open={legendOpen} onToggle={() => setLegendOpen(o => !o)} />
+        <GraphLegend
+          open={legendOpen}
+          onToggle={() => setLegendOpen(o => !o)}
+          hubRingThreshold={hubRingThreshold}
+        />
       )}
 
       {/* C-10: phase indicator. */}
@@ -416,12 +502,31 @@ function linkTouchesSelected(link, selected) {
 }
 
 // ─── Custom node draw ───────────────────────────────────────────────────
-function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId) {
-  // Phase B counterparties take the high-risk orange fill when any risk
-  // indicator fires; otherwise they keep the standard COMPANY hue.
+function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId, hubRingThreshold = 5) {
+  // Counterparty fill (two-tier, post visual-cleanup PR):
+  //   PEP / sanctions / OFAC  → #F97316 orange (strong)
+  //   high-risk jurisdiction only → #D97706 amber (moderate)
+  //   else → gold (COMPANY default)
+  // Orange wins when both conditions are true. Phase A and Phase B share
+  // this fill logic — only the shape differentiates them visually.
   const phaseB = isPhaseBCounterparty(node);
+  const phaseA = !!(node.is_counterparty && !node.counterparty_id);
+  const isCounterparty = phaseA || phaseB;
+  const hasPEPorSanctions = !!(
+    node.risk_indicators?.pep ||
+    node.risk_indicators?.sanctions_hit ||
+    node.ofac_flagged
+  );
+  const hasHighRiskJurisdiction = !!(
+    node.risk_indicators?.high_risk_jurisdiction ||
+    (isCounterparty && node.is_high_risk_country)
+  );
   let color = COLORS[node.type] || '#94A3B8';
-  if (phaseB && node.is_high_risk_counterparty) color = '#F97316';
+  if (isCounterparty && hasPEPorSanctions) {
+    color = '#F97316';                       // orange — strong signal wins
+  } else if (isCounterparty && hasHighRiskJurisdiction) {
+    color = '#D97706';                       // amber — high-risk jurisdiction only
+  }
   const r = radiusFor(node);
 
   // Selection dimming — when a node is clicked, non-neighbour nodes fade
@@ -463,12 +568,14 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     }
   }
 
-  // Body. Phase B counterparties are drawn as a rotated square (diamond);
-  // ACCOUNT nodes as a rounded square (structural, not behavioural);
-  // everything else as a circle.
+  // Body. ALL counterparties (Phase A + B) are drawn as a rotated square
+  // (diamond) — Phase A used to render as a circle, which collided with
+  // customer nodes. The Phase A distinction is preserved via a small "?"
+  // corner badge drawn further down. ACCOUNT nodes use a rounded square
+  // (structural, not behavioural); everything else is a circle.
   const isAccount = node.type === 'ACCOUNT';
   ctx.beginPath();
-  if (phaseB) {
+  if (isCounterparty) {
     ctx.moveTo(node.x,     node.y - r);
     ctx.lineTo(node.x + r, node.y);
     ctx.lineTo(node.x,     node.y + r);
@@ -499,10 +606,13 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.setLineDash([]);
   }
 
-  // Hub ring — fires when this counterparty transacts with 3+ ARC
-  // customers. Visible at zoom ≥ 0.4. The single most important AML
-  // signal the graph can show.
-  if (phaseB && Number(node.shared_with_customer_count) >= 3 && globalScale >= 0.4) {
+  // Hub ring — fires when this counterparty transacts with at least
+  // hubRingThreshold ARC customers (default 5, configurable via the
+  // manager_settings key graph.hub_ring_threshold). Visible at zoom
+  // ≥ 0.4. The single most important AML signal the graph can show.
+  // shared_with_customer_count is only populated on Phase B nodes,
+  // so phaseA counterparties naturally fail the check.
+  if (phaseB && Number(node.shared_with_customer_count) >= hubRingThreshold && globalScale >= 0.4) {
     ctx.beginPath();
     ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI, false);
     ctx.lineWidth = 2;
@@ -528,17 +638,10 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.stroke();
   }
 
-  // High-risk-country dashed ring (drawn first so sanctions/PEP solid
-  // rings sit between it and the selection ring)
-  if (node.is_high_risk_country) {
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 5, 0, 2 * Math.PI, false);
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = '#FF6B35';
-    ctx.setLineDash([3, 2]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
+  // (High-risk-country dashed orange ring retired in the visual-cleanup
+  // PR — see PRE-PR AUDIT note 4. High-risk jurisdiction is now encoded
+  // in the counterparty FILL colour (amber) so the indicator no longer
+  // competes with the sanctions/PEP rings for the third visual channel.)
   if (node.pep || node.sanctions) {
     ctx.beginPath();
     ctx.arc(node.x, node.y, r + 1, 0, 2 * Math.PI, false);
@@ -580,6 +683,32 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.stroke();
   }
 
+  // Phase A "?" corner badge — identity-not-confirmed marker. Phase A
+  // counterparties are string-matched (no counterparty_id FK) so the
+  // analyst should see a small, ambient signal that two same-named
+  // strings might or might not actually be the same entity. Drawn in
+  // the upper-right corner; Phase B nodes have no badge.
+  if (phaseA && globalScale >= 0.5) {
+    const badgeR = Math.max(4, r * 0.28);
+    const bx = node.x + r * 0.7;
+    const by = node.y - r * 0.7;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(bx, by, badgeR, 0, 2 * Math.PI, false);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fill();
+    ctx.lineWidth = 0.8;
+    ctx.strokeStyle = '#9CA3AF';            // gray-400
+    ctx.stroke();
+    const f = Math.max(5, badgeR * 1.1);
+    ctx.font = `bold ${f}px Inter, sans-serif`;
+    ctx.fillStyle = '#6B7280';              // gray-500
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('?', bx, by);
+    ctx.restore();
+  }
+
   // Annotation pin — small yellow square in the upper-left of any node
   // that has at least one pinned note for the current alert. Drawn
   // before the risk-score badge so they don't collide visually.
@@ -607,31 +736,10 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.restore();
   }
 
-  // Risk-score badge — small circle in the upper-right of the node
-  // when the computed score is meaningful (>= 55) or the node is the
-  // current selection. Hidden at far-out zoom to avoid clutter.
-  const isNodeSelected = selected && selected.id === node.id;
-  const score = computeRiskScore(node);
-  if (score != null && (score >= 55 || isNodeSelected) && globalScale >= 0.6) {
-    const badgeR = Math.max(5, Math.min(7, r * 0.5));
-    const bx = node.x + r - 1;
-    const by = node.y - r + 1;
-    ctx.beginPath();
-    ctx.arc(bx, by, badgeR, 0, 2 * Math.PI, false);
-    ctx.fillStyle = riskScoreCanvasColor(score);
-    ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-    ctx.stroke();
-    if (globalScale >= 1.1) {
-      const f = Math.max(7, 8 / globalScale);
-      ctx.font = `bold ${f}px Inter, sans-serif`;
-      ctx.fillStyle = '#FFFFFF';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(String(score), bx, by);
-    }
-  }
+  // (Risk-score badge retired in the visual-cleanup PR — see PRE-PR AUDIT
+  // note 1. The numeric score still appears in the right panel's
+  // RiskScoreBar; the canvas no longer stacks a redundant red disc on
+  // top of the fill + rings.)
 
   // Label rules.
   const isSelected = selected && selected.id === node.id;
@@ -760,7 +868,33 @@ function LoadingState() {
   );
 }
 
-function GraphLegend({ open, onToggle }) {
+function GraphLegend({ open, onToggle, hubRingThreshold = 5 }) {
+  // Three sections, each driven by an inline data array so future
+  // additions / removals are a one-line edit. Swatches use the same
+  // shape vocabulary as the canvas: circle (customer / SAR), diamond
+  // (counterparty), rounded-square (account). The diamond swatch is
+  // a rotated <div> so the legend always mirrors the actual node draw.
+  const nodeTypes = [
+    { shape: 'diamond',     color: COLORS.COMPANY,         label: 'Company / Counterparty (identity verified)' },
+    { shape: 'diamond',     color: COLORS.COMPANY,         label: 'Company / Counterparty (string-matched, not verified)', badge: '?' },
+    { shape: 'diamond',     color: '#D97706',              label: 'Counterparty (high-risk jurisdiction)' },
+    { shape: 'diamond',     color: '#F97316',              label: 'Counterparty (PEP / sanctions / OFAC match)' },
+    { shape: 'circle',      color: COLORS.PERSON,          label: 'Person (customer)' },
+    { shape: 'circle',      color: COLORS.SAR,             label: 'SAR Filing' },
+    { shape: 'rounded',     color: COLORS.ACCOUNT,         label: 'Account' }
+  ];
+  const ringIndicators = [
+    { color: '#DC2626', label: 'Sanctions match' },
+    { color: '#7C3AED', label: 'PEP flag' },
+    { color: '#7C3AED', label: `Network hub (shared by ${hubRingThreshold}+ customers)` },
+    { color: '#3B82F6', label: 'Currently selected node' }
+  ];
+  const fillColours = [
+    { color: COLORS.COMPANY, label: 'Standard counterparty' },
+    { color: '#D97706',      label: 'High-risk jurisdiction' },
+    { color: '#F97316',      label: 'PEP / Sanctions / OFAC match' }
+  ];
+
   return (
     <div
       className="absolute bottom-4 left-4 z-20 text-[11px] text-slate-700"
@@ -769,7 +903,8 @@ function GraphLegend({ open, onToggle }) {
         border: '1px solid #E2E8F0',
         borderRadius: 8,
         padding: open ? '10px 14px' : '6px 10px',
-        boxShadow: '0 4px 16px rgba(15, 23, 42, 0.08)'
+        boxShadow: '0 4px 16px rgba(15, 23, 42, 0.08)',
+        maxWidth: 420
       }}
     >
       <button
@@ -782,19 +917,24 @@ function GraphLegend({ open, onToggle }) {
         <span className="font-semibold uppercase tracking-wider text-[10px]">Legend</span>
       </button>
       {open && (
-        <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1.5">
+        <div className="mt-2 grid grid-cols-3 gap-x-5 gap-y-1.5">
           <div>
             <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Node types</div>
-            <LegendDot color={COLORS.PERSON}  label="Person (customer)" />
-            <LegendDot color={COLORS.COMPANY} label="Company / Counterparty" />
-            <LegendDot color={COLORS.ACCOUNT} label="Account" shape="square" />
-            <LegendDot color={COLORS.SAR}     label="SAR Filing" />
+            {nodeTypes.map((n, i) => (
+              <LegendShape key={i} {...n} />
+            ))}
           </div>
           <div>
             <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Ring indicators</div>
-            <LegendRing color="#DC2626" dash={false} label="Sanctions match" />
-            <LegendRing color="#7C3AED" dash={false} label="PEP flag" />
-            <LegendRing color="#FF6B35" dash={true}  label="High-risk country" />
+            {ringIndicators.map((r, i) => (
+              <LegendRing key={i} color={r.color} label={r.label} />
+            ))}
+          </div>
+          <div>
+            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Fill colours</div>
+            {fillColours.map((f, i) => (
+              <LegendShape key={i} shape="diamond" color={f.color} label={f.label} />
+            ))}
           </div>
         </div>
       )}
@@ -802,22 +942,62 @@ function GraphLegend({ open, onToggle }) {
   );
 }
 
-function LegendDot({ color, label, shape }) {
-  const shapeCls = shape === 'square' ? 'rounded-sm' : 'rounded-full';
+// Renders the legend swatch for a node — circle / diamond / rounded square —
+// at canvas-equivalent visual weight. Diamond is a rotated <div>; the "?"
+// badge is overlaid as a tiny grey circle in the corner, matching the
+// canvas drawing in drawNode for Phase A counterparties.
+function LegendShape({ shape = 'circle', color, label, badge }) {
+  const size = 10;
+  let body;
+  if (shape === 'diamond') {
+    body = (
+      <span
+        className="inline-block shrink-0"
+        style={{
+          width: size, height: size, backgroundColor: color,
+          transform: 'rotate(45deg)', borderRadius: 1
+        }}
+      />
+    );
+  } else if (shape === 'rounded') {
+    body = (
+      <span
+        className="inline-block shrink-0 rounded-sm"
+        style={{ width: size, height: size, backgroundColor: color }}
+      />
+    );
+  } else {
+    body = (
+      <span
+        className="inline-block shrink-0 rounded-full"
+        style={{ width: size, height: size, backgroundColor: color }}
+      />
+    );
+  }
   return (
     <div className="inline-flex items-center gap-1.5 mr-3 mb-0.5 w-full">
-      <span className={`inline-block w-2.5 h-2.5 shrink-0 ${shapeCls}`} style={{ backgroundColor: color }} />
+      <span className="relative inline-flex items-center justify-center" style={{ width: 14, height: 14 }}>
+        {body}
+        {badge && (
+          <span
+            className="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center bg-white border border-gray-400 text-gray-500 font-bold leading-none"
+            style={{ width: 7, height: 7, borderRadius: 4, fontSize: 6 }}
+          >
+            {badge}
+          </span>
+        )}
+      </span>
       <span className="text-slate-700">{label}</span>
     </div>
   );
 }
 
-function LegendRing({ color, dash, label }) {
+function LegendRing({ color, label }) {
   return (
     <div className="inline-flex items-center gap-1.5 mr-3 mb-0.5 w-full">
       <span
         className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-        style={{ background: 'transparent', border: `1.5px ${dash ? 'dashed' : 'solid'} ${color}` }}
+        style={{ background: 'transparent', border: `1.5px solid ${color}` }}
       />
       <span className="text-slate-700">{label}</span>
     </div>

@@ -66,6 +66,13 @@ const MANAGER_DEFAULTS = {
   // 0.85 mirrors the existing utils/ofacScreener.js DEFAULT_THRESHOLD.
   'ofac.screen_threshold': 0.85,
 
+  // CCEG hub-ring threshold — minimum number of ARC customers sharing a
+  // counterparty before the violet hub ring is drawn on the CCEG graph
+  // and the "Network hub" warning fires in the right-panel detail.
+  // Lower values flag more nodes; higher values reserve the signal for
+  // genuine network hubs. Recommended range: 3–10.
+  'graph.hub_ring_threshold': 5,
+
   // C-04: hours since the last successful OFAC SDN sync before the
   // staleness banner appears. Default of 26 = 24h cadence + 2h grace.
   // Recommended range 25-48; UI enforces a 24h floor and 168h (one week)

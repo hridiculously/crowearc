@@ -104,7 +104,11 @@ export default function GraphRightPanel({
   // Annotations (Part 12) — { byTargetKey, addAnnotation, removeAnnotation, enabled, ... }
   annotations = null,
   // Typology hits (Part 14)
-  onHighlightTypology
+  onHighlightTypology,
+  // Hub-ring threshold (visual-cleanup PR). Must match the canvas's ring
+  // threshold so the "Network hub" warning fires exactly when the ring
+  // is visible. Default 5; the modal threads the manager-settings value.
+  hubRingThreshold = 5
 }) {
   const { alerts: timelineAlerts, sars: timelineSars } = useMemo(
     () => deriveTimeline(data, node),
@@ -187,7 +191,7 @@ export default function GraphRightPanel({
           ) : node.type === 'ACCOUNT' ? (
             <AccountDetails node={node} data={data} />
           ) : node.is_counterparty ? (
-            <CounterpartyDetails node={node} data={data} adjacency={adjacency} userRole={userRole} />
+            <CounterpartyDetails node={node} data={data} adjacency={adjacency} userRole={userRole} hubRingThreshold={hubRingThreshold} />
           ) : (
             <CustomerDetails node={node} data={data} adjacency={adjacency} userRole={userRole} rolePrefix={rolePrefix} customerId={customerId} onRecenter={onRecenter} />
           )}
@@ -858,7 +862,7 @@ function CustomerDetails({ node, data, adjacency, userRole, rolePrefix, customer
 }
 
 // ─── Counterparty details ───────────────────────────────────────────────
-function CounterpartyDetails({ node, data, adjacency, userRole }) {
+function CounterpartyDetails({ node, data, adjacency, userRole, hubRingThreshold = 5 }) {
   const focusLink = useMemo(() => {
     if (!data?.links) return null;
     return data.links.find(l => {
@@ -935,7 +939,7 @@ function CounterpartyDetails({ node, data, adjacency, userRole }) {
           <KV k="Total transactions" v={node.txn_count ?? '—'} />
           <KV k="Total volume"       v={fmtMoney(node.total_volume)} />
           <KV k="Customer count"     v={node.shared_with_customer_count >= 99 ? '99+' : (node.shared_with_customer_count ?? '—')} />
-          {Number(node.shared_with_customer_count) >= 3 && (
+          {Number(node.shared_with_customer_count) >= hubRingThreshold && (
             <div className="mt-2 text-[11px] text-violet-800 border border-violet-300 bg-violet-50 rounded px-2.5 py-1.5">
               ⚠ Network hub — this entity transacts with {node.shared_with_customer_count >= 99 ? '99+' : node.shared_with_customer_count} customers in your institution. Review for potential layering or structuring through a common intermediary.
             </div>
