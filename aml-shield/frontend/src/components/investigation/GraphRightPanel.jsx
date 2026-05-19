@@ -24,6 +24,7 @@ import {
   COLORS, initialsOf, fmtMoney, riskTone, priorityTone,
   computeRiskScore, riskScoreTone
 } from './graphHelpers.js';
+import { detectTypologies } from './graphTypology.js';
 
 // ─── Timeline derivation ────────────────────────────────────────────────
 // Pure: given the raw graph payload + a node, returns the alerts and SARs
@@ -101,7 +102,9 @@ export default function GraphRightPanel({
   subgraphFilter = null,
   onClearSubgraphFilter,
   // Annotations (Part 12) — { byTargetKey, addAnnotation, removeAnnotation, enabled, ... }
-  annotations = null
+  annotations = null,
+  // Typology hits (Part 14)
+  onHighlightTypology
 }) {
   const { alerts: timelineAlerts, sars: timelineSars } = useMemo(
     () => deriveTimeline(data, node),
@@ -152,7 +155,13 @@ export default function GraphRightPanel({
         />
       ) : !node ? (
         <>
-          <WelcomeState counts={counts} customerName={customerName} data={data} onSelectNode={onSelectNode} />
+          <WelcomeState
+            counts={counts}
+            customerName={customerName}
+            data={data}
+            onSelectNode={onSelectNode}
+            onHighlightTypology={onHighlightTypology}
+          />
           {(networkRecent.alerts.length > 0 || networkRecent.sars.length > 0) && (
             <div className="px-5 pb-5">
               <div className="text-xs font-semibold tracking-widest text-gray-400 uppercase mb-2">
@@ -525,8 +534,102 @@ function MultiSelectView({ data, multiSelectNodes, onToggleMultiSelectNode, onCl
   );
 }
 
+// ─── Peer benchmark (Part 15) ───────────────────────────────────────────
+// Renders the `peerBenchmark` payload the backend attaches to data.meta
+// when at least 5 peers exist in the same segment. Compares the focus
+// customer's counterparty count + alert count against the segment median
+// and p90 with horizontal bars.
+function PeerBenchmark({ pb }) {
+  if (!pb || !Number(pb.peerCount)) return null;
+  const segLabel = pb.segmentColumn === 'industry'
+    ? `Industry: ${pb.segmentValue}`
+    : `Customer type: ${pb.segmentValue}`;
+
+  return (
+    <div className="mt-6">
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">
+        Peer benchmark
+      </div>
+      <div className="text-[10px] text-slate-500 mb-2">
+        {segLabel} · {pb.peerCount} peer{pb.peerCount === 1 ? '' : 's'}
+      </div>
+      <BenchmarkBar
+        label="Counterparties"
+        focus={pb.focusCounterpartyCount}
+        median={pb.medianCounterparties}
+        p90={pb.p90Counterparties}
+      />
+      <BenchmarkBar
+        label="Alerts"
+        focus={pb.focusAlertCount}
+        median={pb.medianAlerts}
+        p90={null}
+      />
+    </div>
+  );
+}
+
+function BenchmarkBar({ label, focus, median, p90 }) {
+  // Track scale: max of focus / p90 / median × 1.5. Defends against
+  // 0-median degenerate cases.
+  const ceiling = Math.max(
+    Number(focus) || 0,
+    Number(p90) || 0,
+    (Number(median) || 0) * 1.5,
+    1
+  );
+  const focusPct  = Math.min(100, ((Number(focus)  || 0) / ceiling) * 100);
+  const medianPct = Math.min(100, ((Number(median) || 0) / ceiling) * 100);
+  const p90Pct    = p90 != null ? Math.min(100, ((Number(p90) || 0) / ceiling) * 100) : null;
+
+  // Tone for the focus bar — red when focus > p90, amber when > median.
+  const overP90 = p90 != null && Number(focus) > Number(p90);
+  const overMed = Number(focus) > Number(median);
+  const focusCls = overP90 ? 'bg-red-500' : overMed ? 'bg-amber-400' : 'bg-blue-400';
+
+  return (
+    <div className="mb-2.5">
+      <div className="flex items-center justify-between text-[11px] mb-1">
+        <span className="text-slate-700">{label}</span>
+        <span className="tabular-nums text-slate-700">
+          <span className={overP90 ? 'text-red-700 font-bold' : overMed ? 'text-amber-700 font-semibold' : 'font-semibold'}>
+            {focus ?? 0}
+          </span>
+          <span className="text-slate-400"> · median {median != null ? Math.round(Number(median) * 10) / 10 : '—'}
+            {p90 != null ? <> · p90 {Math.round(Number(p90) * 10) / 10}</> : null}
+          </span>
+        </span>
+      </div>
+      <div className="relative h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
+        {/* Focus bar */}
+        <div
+          className={`h-full ${focusCls}`}
+          style={{ width: `${focusPct}%` }}
+        />
+        {/* Median tick */}
+        {median != null && (
+          <div
+            className="absolute top-0 h-full w-px bg-slate-600"
+            style={{ left: `${medianPct}%` }}
+            title={`Median: ${median}`}
+          />
+        )}
+        {/* p90 tick */}
+        {p90Pct != null && (
+          <div
+            className="absolute top-0 h-full w-px bg-slate-900"
+            style={{ left: `${p90Pct}%` }}
+            title={`p90: ${p90}`}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Welcome state (default panel) ──────────────────────────────────────
-function WelcomeState({ counts, customerName, data, onSelectNode }) {
+function WelcomeState({ counts, customerName, data, onSelectNode, onHighlightTypology }) {
+  const typologyHits = useMemo(() => detectTypologies(data), [data]);
   const flagged = useMemo(() => {
     if (!data?.nodes) return [];
     const items = data.nodes
@@ -550,6 +653,45 @@ function WelcomeState({ counts, customerName, data, onSelectNode }) {
           Click any node to see details about that entity and its connections.
         </div>
       </div>
+
+      <PeerBenchmark pb={data?.meta?.peerBenchmark} />
+
+      {typologyHits.length > 0 && (
+        <div className="mt-6">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Flame size={11} className="text-purple-600" />
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">
+              Typology matches ({typologyHits.length})
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            {typologyHits.slice(0, 6).map(t => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => onHighlightTypology && onHighlightTypology(t)}
+                className="w-full text-left border border-slate-200 hover:border-purple-300 hover:bg-purple-50 rounded px-2.5 py-1.5 transition"
+                title={t.evidence}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-navy-900 truncate">{t.label}</div>
+                    <div className="text-[10px] text-slate-500 mt-0.5 truncate">{t.summary}</div>
+                  </div>
+                  <FlagChip tone={t.severity === 'high' ? 'red' : t.severity === 'medium' ? 'orange' : 'slate'}>
+                    {t.severity}
+                  </FlagChip>
+                </div>
+              </button>
+            ))}
+            {typologyHits.length > 6 && (
+              <div className="text-[10px] text-slate-500 italic">
+                +{typologyHits.length - 6} more
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {counts && (
         <div className="mt-6">

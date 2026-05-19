@@ -22,13 +22,14 @@
 
 import { lazy, Suspense, useEffect, useState } from 'react';
 import {
-  Network, Loader2, ChevronDown, ChevronRight, X, Trash2
+  Network, Loader2, ChevronDown, ChevronRight, X, Trash2, GitFork
 } from 'lucide-react';
 import {
   COLORS, NODE_RADIUS, radiusFor, isPhaseBCounterparty,
   truncateLabel, fmtVolumeShort, fmtMoney, shouldShowHoverLabel,
   computeRiskScore, riskScoreCanvasColor
 } from './graphHelpers.js';
+import GraphSankeyView from './GraphSankeyView.jsx';
 
 // Lazy-loaded so the graph library (~150KB) doesn't ship in the main bundle.
 const ForceGraph2D = lazy(() => import('react-force-graph-2d'));
@@ -62,6 +63,8 @@ export default function GraphCanvas({
   // View toggles
   showEdgeLabels = false,
   annotationsByKey = null,
+  clusterByNodeId = null,
+  colorByClusterId = null,
   // Overlay state
   filter,
   filterReset,
@@ -75,7 +78,9 @@ export default function GraphCanvas({
   compareActive = false,
   compareWindow = null,
   compareCounts = null,
-  onClearCompare
+  onClearCompare,
+  // View mode (Part 17) — 'force' (default) | 'sankey'
+  viewMode = 'force'
 }) {
   const [legendOpen, setLegendOpen] = useState(true);
   const [hintVisible, setHintVisible] = useState(true);
@@ -117,6 +122,8 @@ export default function GraphCanvas({
             </div>
           </div>
         </Centered>
+      ) : viewMode === 'sankey' ? (
+        <GraphSankeyView displayData={displayData} size={size} />
       ) : (
         <Suspense fallback={<LoadingState />}>
           <ForceGraph2D
@@ -127,7 +134,7 @@ export default function GraphCanvas({
             backgroundColor="#F8FAFC"
             nodeRelSize={5}
             nodeCanvasObject={(node, ctx, globalScale) =>
-              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey)
+              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId)
             }
             nodePointerAreaPaint={(node, color, ctx) => {
               ctx.fillStyle = color;
@@ -409,7 +416,7 @@ function linkTouchesSelected(link, selected) {
 }
 
 // ─── Custom node draw ───────────────────────────────────────────────────
-function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey) {
+function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId) {
   // Phase B counterparties take the high-risk orange fill when any risk
   // indicator fires; otherwise they keep the standard COMPANY hue.
   const phaseB = isPhaseBCounterparty(node);
@@ -436,6 +443,25 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
   if (node._diffStatus === 'removed') alpha = Math.min(alpha, 0.55);
   ctx.save();
   ctx.globalAlpha = alpha;
+
+  // Cluster halo (Part 16). A soft, tinted disc behind the node body
+  // reveals the community structure without competing with the
+  // selection / focus / sanctions rings drawn later.
+  if (clusterByNodeId && colorByClusterId) {
+    const cid = clusterByNodeId.get(node.id);
+    if (cid != null) {
+      const color = colorByClusterId.get(cid);
+      if (color) {
+        ctx.save();
+        ctx.globalAlpha = alpha * 0.22;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r + 8, 0, 2 * Math.PI, false);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
 
   // Body. Phase B counterparties are drawn as a rotated square (diamond);
   // ACCOUNT nodes as a rounded square (structural, not behavioural);

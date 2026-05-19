@@ -30,6 +30,7 @@ import GraphToolbar from './GraphToolbar.jsx';
 import GraphEdgeFilterPanel from './GraphEdgeFilterPanel.jsx';
 import GraphTimeWindowPanel from './GraphTimeWindowPanel.jsx';
 import GraphSavedViewsPanel, { readSavedViews } from './GraphSavedViewsPanel.jsx';
+import GraphSankeyView from './GraphSankeyView.jsx';
 import { useGraphData } from './hooks/useGraphData.js';
 import { useGraphFilters } from './hooks/useGraphFilters.js';
 import { useGraphSimulation } from './hooks/useGraphSimulation.js';
@@ -37,6 +38,7 @@ import { useGraphInteraction } from './hooks/useGraphInteraction.js';
 import { useGraphAnnotations, edgeKey } from './hooks/useGraphAnnotations.js';
 import { useCompareGraphData } from './hooks/useCompareGraphData.js';
 import { computeGraphDiff } from './graphDiff.js';
+import { computeClusters } from './graphClusters.js';
 import { readUser, rolePrefixFor } from './graphHelpers.js';
 import { captureCanvasPng, downloadPng, blobToFile } from './graphExport.js';
 import api from '../../api/client.js';
@@ -51,6 +53,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     edgeFilters, updateEdgeFilter, resetEdgeFilters, activeEdgeFilterCount,
     multiSelectMode, setMultiSelectMode,
     multiSelectNodes, toggleMultiSelectNode, clearMultiSelect, exitMultiSelectMode,
+    replaceMultiSelectNodes,
     subgraphFilter, setSubgraphFilter,
     showEdgeLabels, setShowEdgeLabels,
     showAccountNodes, setShowAccountNodes,
@@ -127,6 +130,15 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     if (!data?.nodes) return 0;
     return data.nodes.filter(n => n.is_counterparty).length;
   }, [data]);
+
+  // ── Cluster overlay (Part 16). Computed only when the toggle is on
+  //    so cold-path renders skip the BFS scan. The simulation gives
+  //    us filtered displayData; clustering runs on that so subgraph /
+  //    edge-filter narrowing changes the components in real time.
+  const clusters = useMemo(
+    () => showClusters ? computeClusters(displayData) : null,
+    [showClusters, displayData]
+  );
 
   // ── Saved-view indicator (refreshes on rev bump + customer change). ─
   const hasSavedView = useMemo(
@@ -342,6 +354,16 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     }
   };
 
+  // ── Typology highlight: replace multi-select with the match's
+  //    node IDs, then open multi-select mode so the analyst can
+  //    inspect / extend / build a subgraph from the matched group.
+  const handleTypologyHighlight = (match) => {
+    if (!match?.nodeIds?.length) return;
+    setSelected(null);
+    replaceMultiSelectNodes(match.nodeIds);
+    setMultiSelectMode(true);
+  };
+
   // ── "Build Subgraph" — keep multi-selected nodes + everything one
   //    hop away. Used by the right-panel multi-select view.
   const buildSubgraph = () => {
@@ -443,6 +465,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
           <GraphCanvas
             data={mergedData || data}
             displayData={displayData}
+            viewMode={viewMode}
             compareActive={!!compareWindow}
             compareWindow={compareWindow}
             compareCounts={mergedData?.meta?.compareCounts || null}
@@ -467,6 +490,8 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             multiSelectedIds={multiSelectNodes}
             showEdgeLabels={showEdgeLabels}
             annotationsByKey={annotations.byTargetKey}
+            clusterByNodeId={clusters?.clusterByNodeId || null}
+            colorByClusterId={clusters?.colorByClusterId || null}
             filter={filter}
             filterReset={filterReset}
             navHistory={navHistory}
@@ -500,6 +525,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             subgraphFilter={subgraphFilter}
             onClearSubgraphFilter={() => setSubgraphFilter(null)}
             annotations={annotations}
+            onHighlightTypology={handleTypologyHighlight}
           />
         </div>
 

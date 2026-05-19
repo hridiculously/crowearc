@@ -112,6 +112,15 @@ export function useGraphFilters() {
     setSubgraphFilter(null);
   }, []);
 
+  // Replace the entire multi-select set in one go — used by the
+  // typology matcher and other features that need to highlight a
+  // specific node group without driving the analyst through a
+  // click-by-click bag fill.
+  const replaceMultiSelectNodes = useCallback((ids) => {
+    setMultiSelectNodes(new Set(Array.isArray(ids) ? ids : []));
+    setSubgraphFilter(null);
+  }, []);
+
   const exitMultiSelectMode = useCallback(() => {
     setMultiSelectMode(false);
     setMultiSelectNodes(new Set());
@@ -130,6 +139,7 @@ export function useGraphFilters() {
     // Multi-select
     multiSelectMode, setMultiSelectMode,
     multiSelectNodes, toggleMultiSelectNode, clearMultiSelect,
+    replaceMultiSelectNodes,
     subgraphFilter, setSubgraphFilter,
     exitMultiSelectMode,
     // Toolbar toggles
