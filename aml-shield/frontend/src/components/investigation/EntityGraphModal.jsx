@@ -180,30 +180,61 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
 
   // ── d3-force tuning. Tuned for dense hub-and-spoke networks
   //    (crypto exchanges, MSBs) where a focus customer pulls 15+
-  //    counterparties on one orbit. With the previous defaults
-  //    (charge -320, link distance 140) those graphs opened as
-  //    a single overlapping cluster the analyst had to manually
-  //    drag apart. The current values:
-  //      * charge -900 with distanceMax=900 — strong long-range
-  //        repulsion that breaks the orbit cluster
-  //      * link distance 220 / strength 0.35 — wider spokes
-  //      * forceCollide(radiusFor + 18) — hard no-overlap
-  //        constraint so node bodies never visually pile up
-  //    Auto-fit fires from onEngineStop (below) rather than a
-  //    fixed timeout so the camera frames the settled layout.
+  //    counterparties on one orbit. Two ingredients matter most:
+  //
+  //      1. Initial seed positions. ForceGraph randomises positions
+  //         in a tiny [-1..1] box. Strong forces can't spread nodes
+  //         from that seed in the time budget we give the engine.
+  //         We pre-seed counterparty nodes in a circle around the
+  //         focus so the simulation starts from a sensible layout
+  //         and only refines it. Customer-only nodes (PERSON /
+  //         COMPANY without is_counterparty) are positioned on an
+  //         outer ring so they don't compete for the inner orbit.
+  //
+  //      2. Force config + cool-down budget. Very strong charge and
+  //         a hard collide force (no-overlap), plus a long enough
+  //         simulation budget (cooldownTicks=400, alpha decay 0.012)
+  //         for the forces to actually move nodes from the seed
+  //         positions toward equilibrium.
+  //
+  //    Auto-fit fires from onEngineStop (in GraphCanvas) so the
+  //    camera frames the settled layout, not a mid-simulation snapshot.
   useEffect(() => {
-    if (!fgRef.current || !data) return;
+    if (!fgRef.current || !data?.nodes) return;
+    // Seed positions only on the first sight of this data ref — once
+    // any node has x/y assigned we leave it (re-running the effect on
+    // the same data would tear stable layouts apart).
     try {
+      const focus = data.nodes.find(n => n.is_focus);
+      const others = data.nodes.filter(n => !n.is_focus);
+      const seedDone = (focus && focus.x != null) || others.some(n => n.x != null);
+      if (!seedDone) {
+        if (focus) { focus.x = 0; focus.y = 0; }
+        const counterparties = others.filter(n => n.is_counterparty);
+        const customers      = others.filter(n => !n.is_counterparty);
+        const innerR = Math.max(220, counterparties.length * 28);
+        counterparties.forEach((n, i) => {
+          const a = (i / Math.max(counterparties.length, 1)) * 2 * Math.PI;
+          n.x = Math.cos(a) * innerR;
+          n.y = Math.sin(a) * innerR;
+        });
+        const outerR = innerR + 180;
+        customers.forEach((n, i) => {
+          const a = (i / Math.max(customers.length, 1)) * 2 * Math.PI + 0.5;
+          n.x = Math.cos(a) * outerR;
+          n.y = Math.sin(a) * outerR;
+        });
+      }
       const chargeForce = fgRef.current.d3Force('charge');
-      if (chargeForce) chargeForce.strength(-900).distanceMax(900);
+      if (chargeForce) chargeForce.strength(-1400).distanceMax(1500);
       const linkForce = fgRef.current.d3Force('link');
-      if (linkForce) linkForce.distance(220).strength(0.35);
+      if (linkForce) linkForce.distance(240).strength(0.3);
       fgRef.current.d3Force(
         'collide',
-        forceCollide(n => radiusFor(n) + 18).strength(0.9).iterations(2)
+        forceCollide(n => radiusFor(n) + 28).strength(1.0).iterations(3)
       );
-      // Re-heat the simulation so the new forces actually apply
-      // when this effect re-runs on a fresh customer / re-fetch.
+      // Re-heat so the forces actually apply when this effect
+      // re-runs on a fresh customer / re-fetch.
       if (typeof fgRef.current.d3ReheatSimulation === 'function') {
         fgRef.current.d3ReheatSimulation();
       }
@@ -211,13 +242,13 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
   }, [data]);
 
   // Auto-fit safety net — if onEngineStop doesn't fire (some lib
-  // builds skip it on tiny graphs), this falls back at 2.5s. The
+  // builds skip it on tiny graphs), this falls back at 3s. The
   // primary fit happens from the ForceGraph2D onEngineStop callback.
   useEffect(() => {
     if (!fgRef.current || !data) return;
     const t = setTimeout(() => {
-      try { fgRef.current.zoomToFit(400, 120); } catch (_) { /* ignore */ }
-    }, 2500);
+      try { fgRef.current.zoomToFit(400, 140); } catch (_) { /* ignore */ }
+    }, 3000);
     return () => clearTimeout(t);
   }, [data]);
 

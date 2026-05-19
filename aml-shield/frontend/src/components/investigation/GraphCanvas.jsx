@@ -243,15 +243,16 @@ export default function GraphCanvas({
             onLinkHover={(link) => setHoveredLink(link || null)}
             onNodeDragEnd={(node) => { node.fx = node.x; node.fy = node.y; }}
             onNodeRightClick={onNodeContext}
-            cooldownTicks={200}
-            warmupTicks={120}
-            d3VelocityDecay={0.4}
-            d3AlphaDecay={0.025}
-            // Frame the network as soon as the simulation settles.
-            // Replaces the old setTimeout-based zoomToFit which was
-            // racing the layout on dense graphs.
+            cooldownTicks={400}
+            warmupTicks={200}
+            d3VelocityDecay={0.3}
+            d3AlphaDecay={0.012}
+            // Frame the network when the simulation settles. The
+            // 400-tick budget + 0.012 alpha decay gives the forces
+            // enough time to actually move the seeded positions
+            // toward equilibrium before the camera fits.
             onEngineStop={() => {
-              try { fgRef.current?.zoomToFit(400, 120); } catch (_) { /* ignore */ }
+              try { fgRef.current?.zoomToFit(400, 140); } catch (_) { /* ignore */ }
             }}
           />
         </Suspense>
