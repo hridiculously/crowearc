@@ -178,26 +178,60 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     return () => ro.disconnect();
   }, []);
 
-  // ── d3-force tuning per the layout-fix spec. The previous
-  //    iteration added pre-seeded ring positions and a much
-  //    stronger charge, but the graph still opened piled-up.
-  //    This version follows the spec recipe: moderate charge,
-  //    per-link-type distance, hard collide, and let
-  //    warmupTicks=120 do the work BEFORE the first paint so
-  //    the analyst never sees a mid-simulation cluster.
+  // ── d3-force tuning. Two ingredients that together guarantee
+  //    a spread radial layout on first paint:
+  //
+  //      1. Pre-seed positions. ForceGraph randomises positions in
+  //         a tiny [-1..1] box; even strong forces don't have time
+  //         to move 15+ nodes from that seed to equilibrium during
+  //         warmupTicks. We deterministically place the focus at
+  //         the origin, counterparties on an inner ring sized to
+  //         their count, and any customer-only neighbours on an
+  //         outer ring. The simulation then *refines* this layout
+  //         instead of fighting random chaos.
+  //
+  //      2. Spec force config + warmupTicks. Moderate charge,
+  //         per-link-type distance, hard collide. The simulation
+  //         runs 120 ticks invisibly in warmup; with seeded starts
+  //         that's plenty to round off the perfect-circle look
+  //         into the organic radial layout below.
+  //
+  //    Seeding runs once per data ref; once any node carries x/y
+  //    the seed is skipped so re-renders never tear stable
+  //    positions apart.
   useEffect(() => {
-    if (!fgRef.current || !data) return;
+    if (!fgRef.current || !data?.nodes) return;
     try {
-      // CHANGE-1 target: force configuration.
-      // Strong repulsion — pushes nodes apart.
+      // ── 1. Pre-seed deterministic radial positions ──────────
+      const focus = data.nodes.find(n => n.is_focus);
+      const others = data.nodes.filter(n => !n.is_focus);
+      const seedDone = (focus && focus.x != null) || others.some(n => n.x != null);
+      if (!seedDone) {
+        if (focus) { focus.x = 0; focus.y = 0; }
+        const counterparties = others.filter(n => n.is_counterparty);
+        const customers      = others.filter(n => !n.is_counterparty);
+        // Inner ring — counterparties. Radius scales with count so a
+        // 6-CP graph and a 20-CP graph both have similar gaps.
+        const innerR = Math.max(180, counterparties.length * 24);
+        counterparties.forEach((n, i) => {
+          const a = (i / Math.max(counterparties.length, 1)) * 2 * Math.PI;
+          n.x = Math.cos(a) * innerR;
+          n.y = Math.sin(a) * innerR;
+        });
+        // Outer ring — neighbour customers (CO_OCCURS_WITH links).
+        // Offset rotation by 0.5rad so they interleave the gaps in
+        // the inner ring rather than aligning radially.
+        const outerR = innerR + 160;
+        customers.forEach((n, i) => {
+          const a = (i / Math.max(customers.length, 1)) * 2 * Math.PI + 0.5;
+          n.x = Math.cos(a) * outerR;
+          n.y = Math.sin(a) * outerR;
+        });
+      }
+
+      // ── 2. Force config (spec recipe) ───────────────────────
       const chargeForce = fgRef.current.d3Force('charge');
       if (chargeForce) chargeForce.strength(-600);
-
-      // Per-link-type distance. TRANSACTS_WITH (the customer's
-      // spokes) gets a moderate spread; CO_OCCURS_WITH (computed
-      // neighbour links between customers sharing a counterparty)
-      // gets the longest distance so customer satellites land
-      // outside the counterparty orbit.
       const linkForce = fgRef.current.d3Force('link');
       if (linkForce) {
         linkForce.distance(link => {
@@ -206,17 +240,10 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
           return 140;
         });
       }
-
-      // Hard no-overlap. radiusFor(n) is the same world-space
-      // radius the canvas drawer uses, so +18 padding leaves a
-      // clear visual gap between node edges.
       fgRef.current.d3Force(
         'collision',
         forceCollide(n => radiusFor(n) + 18)
       );
-
-      // Reheat so the new forces actually apply on a fresh data
-      // ref (recentre, re-fetch on time-window change, etc.).
       if (typeof fgRef.current.d3ReheatSimulation === 'function') {
         fgRef.current.d3ReheatSimulation();
       }
