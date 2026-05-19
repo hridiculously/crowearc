@@ -178,77 +178,59 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     return () => ro.disconnect();
   }, []);
 
-  // ── d3-force tuning. Tuned for dense hub-and-spoke networks
-  //    (crypto exchanges, MSBs) where a focus customer pulls 15+
-  //    counterparties on one orbit. Two ingredients matter most:
-  //
-  //      1. Initial seed positions. ForceGraph randomises positions
-  //         in a tiny [-1..1] box. Strong forces can't spread nodes
-  //         from that seed in the time budget we give the engine.
-  //         We pre-seed counterparty nodes in a circle around the
-  //         focus so the simulation starts from a sensible layout
-  //         and only refines it. Customer-only nodes (PERSON /
-  //         COMPANY without is_counterparty) are positioned on an
-  //         outer ring so they don't compete for the inner orbit.
-  //
-  //      2. Force config + cool-down budget. Very strong charge and
-  //         a hard collide force (no-overlap), plus a long enough
-  //         simulation budget (cooldownTicks=400, alpha decay 0.012)
-  //         for the forces to actually move nodes from the seed
-  //         positions toward equilibrium.
-  //
-  //    Auto-fit fires from onEngineStop (in GraphCanvas) so the
-  //    camera frames the settled layout, not a mid-simulation snapshot.
+  // ── d3-force tuning per the layout-fix spec. The previous
+  //    iteration added pre-seeded ring positions and a much
+  //    stronger charge, but the graph still opened piled-up.
+  //    This version follows the spec recipe: moderate charge,
+  //    per-link-type distance, hard collide, and let
+  //    warmupTicks=120 do the work BEFORE the first paint so
+  //    the analyst never sees a mid-simulation cluster.
   useEffect(() => {
-    if (!fgRef.current || !data?.nodes) return;
-    // Seed positions only on the first sight of this data ref — once
-    // any node has x/y assigned we leave it (re-running the effect on
-    // the same data would tear stable layouts apart).
+    if (!fgRef.current || !data) return;
     try {
-      const focus = data.nodes.find(n => n.is_focus);
-      const others = data.nodes.filter(n => !n.is_focus);
-      const seedDone = (focus && focus.x != null) || others.some(n => n.x != null);
-      if (!seedDone) {
-        if (focus) { focus.x = 0; focus.y = 0; }
-        const counterparties = others.filter(n => n.is_counterparty);
-        const customers      = others.filter(n => !n.is_counterparty);
-        const innerR = Math.max(220, counterparties.length * 28);
-        counterparties.forEach((n, i) => {
-          const a = (i / Math.max(counterparties.length, 1)) * 2 * Math.PI;
-          n.x = Math.cos(a) * innerR;
-          n.y = Math.sin(a) * innerR;
-        });
-        const outerR = innerR + 180;
-        customers.forEach((n, i) => {
-          const a = (i / Math.max(customers.length, 1)) * 2 * Math.PI + 0.5;
-          n.x = Math.cos(a) * outerR;
-          n.y = Math.sin(a) * outerR;
+      // CHANGE-1 target: force configuration.
+      // Strong repulsion — pushes nodes apart.
+      const chargeForce = fgRef.current.d3Force('charge');
+      if (chargeForce) chargeForce.strength(-600);
+
+      // Per-link-type distance. TRANSACTS_WITH (the customer's
+      // spokes) gets a moderate spread; CO_OCCURS_WITH (computed
+      // neighbour links between customers sharing a counterparty)
+      // gets the longest distance so customer satellites land
+      // outside the counterparty orbit.
+      const linkForce = fgRef.current.d3Force('link');
+      if (linkForce) {
+        linkForce.distance(link => {
+          if (link.type === 'TRANSACTS_WITH') return 160;
+          if (link.type === 'CO_OCCURS_WITH') return 200;
+          return 140;
         });
       }
-      const chargeForce = fgRef.current.d3Force('charge');
-      if (chargeForce) chargeForce.strength(-1400).distanceMax(1500);
-      const linkForce = fgRef.current.d3Force('link');
-      if (linkForce) linkForce.distance(240).strength(0.3);
+
+      // Hard no-overlap. radiusFor(n) is the same world-space
+      // radius the canvas drawer uses, so +18 padding leaves a
+      // clear visual gap between node edges.
       fgRef.current.d3Force(
-        'collide',
-        forceCollide(n => radiusFor(n) + 28).strength(1.0).iterations(3)
+        'collision',
+        forceCollide(n => radiusFor(n) + 18)
       );
-      // Re-heat so the forces actually apply when this effect
-      // re-runs on a fresh customer / re-fetch.
+
+      // Reheat so the new forces actually apply on a fresh data
+      // ref (recentre, re-fetch on time-window change, etc.).
       if (typeof fgRef.current.d3ReheatSimulation === 'function') {
         fgRef.current.d3ReheatSimulation();
       }
     } catch (_) { /* older lib versions may not expose d3Force */ }
   }, [data]);
 
-  // Auto-fit safety net — if onEngineStop doesn't fire (some lib
-  // builds skip it on tiny graphs), this falls back at 3s. The
-  // primary fit happens from the ForceGraph2D onEngineStop callback.
+  // Auto-fit safety net — falls back if ForceGraph's
+  // onEngineStop signal doesn't fire (some library builds skip
+  // it on tiny graphs). Aligned to the spec's 2s budget.
   useEffect(() => {
     if (!fgRef.current || !data) return;
     const t = setTimeout(() => {
       try { fgRef.current.zoomToFit(400, 140); } catch (_) { /* ignore */ }
-    }, 3000);
+    }, 2000);
     return () => clearTimeout(t);
   }, [data]);
 
@@ -560,7 +542,6 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             multiSelectMode={multiSelectMode}
             multiSelectedIds={multiSelectNodes}
             showEdgeLabels={showEdgeLabels}
-            hubRingThreshold={hubRingThreshold}
             annotationsByKey={annotations.byTargetKey}
             filter={filter}
             filterReset={filterReset}

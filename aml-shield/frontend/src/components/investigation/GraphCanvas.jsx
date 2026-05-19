@@ -35,25 +35,27 @@
 //    on top at zoom ≥ 1.1. Now retired from the canvas — the numeric
 //    score lives on in the right-panel RiskScoreBar.
 //
-// 2) HUB RING  (THRESHOLD now configurable.)
-//    Previously: hardcoded `node.shared_with_customer_count >= 3`. Now
-//    driven by the `hubRingThreshold` prop (read once on modal mount
-//    from manager_settings key `graph.hub_ring_threshold`, default 5).
-//    Colour `#7C3AED` (violet), stroke 2px at radius r+4. Visible at
-//    globalScale ≥ 0.4.
+// 2) HUB RING  (RETIRED.)
+//    Previously a violet outer ring at r+4 driven by the
+//    hubRingThreshold prop (manager_settings key
+//    graph.hub_ring_threshold). In dense networks the ring fired
+//    on most counterparties and read as background texture. The
+//    hub concept is preserved through node size — radiusFor
+//    log-scales counterparty radius with txn_count, so high-volume
+//    hubs are visibly larger circles. The right panel still
+//    surfaces a "⚠ Network hub" text warning at the same threshold.
 //
 // 3) RING-DRAW SEQUENCE (top of drawNode → bottom; later = visually outer):
 //    a. body fill            (circle for entities, rounded-square for ACCOUNT)
-//    b. hub ring             (violet, r+4) — PhaseB CP w/ shared ≥ threshold
-//    c. sanctions ring       (red,    r+1) — risk_indicators.sanctions_hit
-//    d. focus halo           (node colour, r+3) — node.is_focus
-//    e. pep/sanctions ring   (red or violet, r+1) — node.pep / .sanctions
-//    f. diff status ring     (green/red, r+4) — Part 11 _diffStatus
-//    g. selection ring       (blue, r+7) — selected single click
-//    h. multi-select ring    (amber, r+5) — node in multiSelectedIds
-//    i. annotation pin       (yellow, top-left) — Part 12
-//    Retired in this layer: cluster halo (overlay was useless on
-//    dense graphs), high-risk-country dashed ring (now encoded in
+//    b. sanctions ring       (red,    r+1) — risk_indicators.sanctions_hit
+//    c. focus halo           (node colour, r+3) — node.is_focus
+//    d. pep/sanctions ring   (red or violet, r+1) — node.pep / .sanctions
+//    e. diff status ring     (green/red, r+4) — Part 11 _diffStatus
+//    f. selection ring       (blue, r+7) — selected single click
+//    g. multi-select ring    (amber, r+5) — node in multiSelectedIds
+//    h. annotation pin       (yellow, top-left) — Part 12
+//    Retired in this layer: hub ring (background texture on dense
+//    graphs), cluster halo, high-risk-country dashed ring (now in
 //    fill colour), Phase A "?" badge, risk-score badge.
 //
 // 4) ORANGE FILL  (NOW TWO-TIER.)
@@ -127,10 +129,10 @@ export default function GraphCanvas({
   multiSelectedIds = null,
   // View toggles
   showEdgeLabels = false,
-  // Hub-ring threshold sourced from manager_settings via EntityGraphModal
-  // (key: graph.hub_ring_threshold). The legend reads it too so the
-  // "Network hub (shared by N+)" label always agrees with the actual ring.
-  hubRingThreshold = 5,
+  // (hubRingThreshold prop retired — the violet hub ring was removed
+  // from the canvas. The right panel still surfaces a "Network hub"
+  // text warning at the same threshold; that lives in GraphRightPanel
+  // and consumes its own prop from EntityGraphModal.)
   annotationsByKey = null,
   // Overlay state
   filter,
@@ -201,7 +203,7 @@ export default function GraphCanvas({
             backgroundColor="#F8FAFC"
             nodeRelSize={5}
             nodeCanvasObject={(node, ctx, globalScale) =>
-              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, hubRingThreshold)
+              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey)
             }
             nodePointerAreaPaint={(node, color, ctx) => {
               ctx.fillStyle = color;
@@ -243,14 +245,15 @@ export default function GraphCanvas({
             onLinkHover={(link) => setHoveredLink(link || null)}
             onNodeDragEnd={(node) => { node.fx = node.x; node.fy = node.y; }}
             onNodeRightClick={onNodeContext}
-            cooldownTicks={400}
-            warmupTicks={200}
-            d3VelocityDecay={0.3}
-            d3AlphaDecay={0.012}
-            // Frame the network when the simulation settles. The
-            // 400-tick budget + 0.012 alpha decay gives the forces
-            // enough time to actually move the seeded positions
-            // toward equilibrium before the camera fits.
+            // CHANGE-1 target: simulation budget. warmupTicks=120
+            // runs 120 ticks invisibly before the first paint so
+            // the analyst never sees a mid-simulation cluster.
+            // cooldownTicks=0 stops the animated cool-down after
+            // the warmup completes — there's nothing to refine
+            // since the layout is already settled.
+            warmupTicks={120}
+            cooldownTicks={0}
+            // Frame the network when the simulation settles.
             onEngineStop={() => {
               try { fgRef.current?.zoomToFit(400, 140); } catch (_) { /* ignore */ }
             }}
@@ -258,10 +261,7 @@ export default function GraphCanvas({
         </Suspense>
       )}
 
-      {/* Hover-following label tooltip. For counterparties we append a
-          grey identity line so the analyst can tell at-a-glance whether
-          the entity is a verified dedup match (Phase B, counterparty_id
-          present) or a string match that could be a false link. */}
+      {/* Hover-following label tooltip. */}
       {hoveredNode && shouldShowHoverLabel(hoveredNode) && (
         <div
           className="absolute pointer-events-none rounded px-2 py-1 text-[11px] font-medium text-navy-900 border border-slate-200 shadow-md"
@@ -273,14 +273,7 @@ export default function GraphCanvas({
             maxWidth: 240
           }}
         >
-          <div>{hoveredNode.label}</div>
-          {hoveredNode.is_counterparty && (
-            <div className="text-[10px] italic text-slate-500 mt-0.5">
-              {hoveredNode.counterparty_id
-                ? 'Identity: verified entity link'
-                : 'Identity: string-matched (not deduplicated)'}
-            </div>
-          )}
+          {hoveredNode.label}
         </div>
       )}
 
@@ -292,7 +285,6 @@ export default function GraphCanvas({
         <GraphLegend
           open={legendOpen}
           onToggle={() => setLegendOpen(o => !o)}
-          hubRingThreshold={hubRingThreshold}
         />
       )}
 
@@ -504,7 +496,7 @@ function linkTouchesSelected(link, selected) {
 }
 
 // ─── Custom node draw ───────────────────────────────────────────────────
-function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, hubRingThreshold = 5) {
+function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey) {
   // Counterparty fill (two-tier, post visual-cleanup PR):
   //   PEP / sanctions / OFAC  → #F97316 orange (strong)
   //   high-risk jurisdiction only → #D97706 amber (moderate)
@@ -587,19 +579,12 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.setLineDash([]);
   }
 
-  // Hub ring — fires when this counterparty transacts with at least
-  // hubRingThreshold ARC customers (default 5, configurable via the
-  // manager_settings key graph.hub_ring_threshold). Visible at zoom
-  // ≥ 0.4. The single most important AML signal the graph can show.
-  // shared_with_customer_count is only populated on Phase B nodes,
-  // so phaseA counterparties naturally fail the check.
-  if (phaseB && Number(node.shared_with_customer_count) >= hubRingThreshold && globalScale >= 0.4) {
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI, false);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#7C3AED';
-    ctx.stroke();
-  }
+  // (Hub ring retired per follow-up UX feedback — in dense networks
+  // the violet ring fired on most counterparties and read as
+  // background texture rather than signal. Node size is now the
+  // hub indicator: high-volume counterparties have a larger radius
+  // via radiusFor's log-scaling of txn_count. The right panel still
+  // surfaces a "⚠ Network hub" text warning at the same threshold.)
 
   // Sanctions hazard ring (Phase B counterparties from risk_indicators).
   if (phaseB && node.risk_indicators?.sanctions_hit) {
@@ -827,7 +812,7 @@ function LoadingState() {
   );
 }
 
-function GraphLegend({ open, onToggle, hubRingThreshold = 5 }) {
+function GraphLegend({ open, onToggle }) {
   // Three sections, each driven by an inline data array so future
   // additions / removals are a one-line edit. Swatches use the same
   // shape vocabulary as the canvas: circle (customer / SAR), diamond
@@ -843,8 +828,7 @@ function GraphLegend({ open, onToggle, hubRingThreshold = 5 }) {
   ];
   const ringIndicators = [
     { color: '#DC2626', label: 'Sanctions match' },
-    { color: '#7C3AED', label: 'PEP flag' },
-    { color: '#7C3AED', label: `Network hub (shared by ${hubRingThreshold}+ customers)` }
+    { color: '#7C3AED', label: 'PEP flag' }
   ];
   const fillColours = [
     { color: COLORS.COMPANY, label: 'Standard counterparty' },
