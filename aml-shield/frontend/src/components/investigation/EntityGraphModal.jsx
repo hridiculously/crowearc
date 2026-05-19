@@ -29,13 +29,16 @@ import GraphRightPanel from './GraphRightPanel.jsx';
 import GraphToolbar from './GraphToolbar.jsx';
 import GraphEdgeFilterPanel from './GraphEdgeFilterPanel.jsx';
 import GraphTimeWindowPanel from './GraphTimeWindowPanel.jsx';
+import GraphSavedViewsPanel, { readSavedViews } from './GraphSavedViewsPanel.jsx';
 import { useGraphData } from './hooks/useGraphData.js';
 import { useGraphFilters } from './hooks/useGraphFilters.js';
 import { useGraphSimulation } from './hooks/useGraphSimulation.js';
 import { useGraphInteraction } from './hooks/useGraphInteraction.js';
 import { readUser, rolePrefixFor } from './graphHelpers.js';
+import { captureCanvasPng, downloadPng, blobToFile } from './graphExport.js';
+import api from '../../api/client.js';
 
-export default function EntityGraphModal({ customerId, customerName, onClose }) {
+export default function EntityGraphModal({ customerId, customerName, alertId = null, onClose }) {
   // ── Toolbar/view state ──────────────────────────────────────────────
   // Toolbar toggles (account nodes + time window) drive the fetch params.
   // showAccountNodes triggers a re-fetch via the hook's paramsKey.
@@ -55,6 +58,13 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
   const [timeWindow, setTimeWindow] = useState(null);   // { from, to } or null
   const [edgeFilterOpen, setEdgeFilterOpen] = useState(false);
   const [timeWindowOpen, setTimeWindowOpen] = useState(false);
+  const [savedViewsOpen, setSavedViewsOpen] = useState(false);
+  // Counter that re-reads savedViews on close — drives the toolbar's
+  // "has saved view" indicator without a global event bus.
+  const [savedViewsRev, setSavedViewsRev] = useState(0);
+  // Toast for export / evidence-capture results so the analyst gets
+  // visible feedback without an alert(). { kind: 'success'|'error', text }
+  const [toast, setToast] = useState(null);
 
   const fetchParams = useMemo(() => ({
     from: timeWindow?.from || null,
@@ -95,6 +105,12 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
     if (!data?.nodes) return 0;
     return data.nodes.filter(n => n.is_counterparty).length;
   }, [data]);
+
+  // ── Saved-view indicator (refreshes on rev bump + customer change). ─
+  const hasSavedView = useMemo(
+    () => readSavedViews(currentCustomerId).length > 0,
+    [currentCustomerId, savedViewsRev]
+  );
 
   // ── Clear selection on re-center (selection from prior graph isn't valid) ─
   useEffect(() => { setSelected(null); }, [currentCustomerId, setSelected]);
@@ -141,13 +157,22 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
         setEdgeFilterOpen(false);
       } else if (timeWindowOpen) {
         setTimeWindowOpen(false);
+      } else if (savedViewsOpen) {
+        setSavedViewsOpen(false);
       } else {
         onClose && onClose();
       }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [multiSelectMode, edgeFilterOpen, timeWindowOpen, exitMultiSelectMode, onClose]);
+  }, [multiSelectMode, edgeFilterOpen, timeWindowOpen, savedViewsOpen, exitMultiSelectMode, onClose]);
+
+  // Auto-dismiss toast after 3.5s.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -181,6 +206,99 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
     setSelected(node || null);
   };
 
+  // ── Export / evidence helpers ──────────────────────────────────────
+  // Shared between the Download button (downloads the PNG) and the
+  // Camera button (uploads it as case evidence). The header strip
+  // identifies who exported it and from what scope, so the image is
+  // self-attributing if it leaves the workbench.
+  const buildExportHeader = () => ({
+    title: customerName ? `Entity Network — ${customerName}` : 'Entity Network',
+    subtitle: currentCustomerId ? `Focus: ${currentCustomerId}` : null,
+    window: timeWindow ? `${timeWindow.from || '–'} → ${timeWindow.to || '–'}` : null,
+    analyst: userName || null,
+    timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC'
+  });
+
+  const handleExportPng = async () => {
+    try {
+      const blob = await captureCanvasPng({
+        container: containerRef.current,
+        header: buildExportHeader()
+      });
+      const fname = `cceg_${currentCustomerId || 'graph'}_${Date.now()}.png`;
+      downloadPng(fname, blob);
+      setToast({ kind: 'success', text: 'PNG downloaded.' });
+    } catch (err) {
+      setToast({ kind: 'error', text: err?.message || 'Export failed.' });
+    }
+  };
+
+  const handleCaptureEvidence = async () => {
+    if (!alertId) {
+      // No alert in scope — fall back to download with a hint.
+      await handleExportPng();
+      setToast({ kind: 'info', text: 'No alert in scope — downloaded instead.' });
+      return;
+    }
+    try {
+      const blob = await captureCanvasPng({
+        container: containerRef.current,
+        header: buildExportHeader()
+      });
+      const filename = `cceg_${currentCustomerId || 'graph'}_${Date.now()}.png`;
+      const form = new FormData();
+      form.append('file', blobToFile(blob, filename), filename);
+      form.append('alert_id', alertId);
+      form.append('document_type', 'Network Snapshot');
+      form.append('description', `Entity network graph capture${timeWindow ? ` (${timeWindow.from || '–'} → ${timeWindow.to || '–'})` : ''}`);
+      if (userName) form.append('uploaded_by', userName);
+      await api.post('/case-documents/upload', form, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      setToast({ kind: 'success', text: 'Saved to case evidence.' });
+    } catch (err) {
+      const msg = err?.response?.data?.error || err?.message || 'Evidence capture failed.';
+      setToast({ kind: 'error', text: msg });
+    }
+  };
+
+  // ── Saved views: build a snapshot of all view-driving state and
+  //    apply one when the analyst picks it back. We intentionally do
+  //    NOT capture multi-select state — selection is an in-session
+  //    affordance, not a saved scope.
+  const buildViewSnapshot = () => ({
+    filter,
+    edgeFilters,
+    timeWindow,
+    showEdgeLabels,
+    showAccountNodes,
+    showClusters,
+    viewMode
+  });
+
+  const applyViewSnapshot = (snap) => {
+    if (!snap) return;
+    if (snap.filter)               filters.setFilter(snap.filter);
+    if (snap.edgeFilters) {
+      for (const [k, v] of Object.entries(snap.edgeFilters)) updateEdgeFilter(k, v);
+    }
+    setTimeWindow(snap.timeWindow || null);
+    setShowEdgeLabels(!!snap.showEdgeLabels);
+    setShowAccountNodes(!!snap.showAccountNodes);
+    setShowClusters(!!snap.showClusters);
+    setViewMode(snap.viewMode || 'force');
+    setSavedViewsOpen(false);
+    setToast({ kind: 'success', text: 'View applied.' });
+  };
+
+  // Helper: open one popover at a time. Used by the toolbar action
+  // router to keep the canvas surface uncluttered.
+  const openOne = (which) => {
+    setEdgeFilterOpen(which === 'edgeFilter');
+    setTimeWindowOpen(which === 'timeWindow');
+    setSavedViewsOpen(which === 'savedViews');
+  };
+
   // ── Toolbar action router ──────────────────────────────────────────
   const handleToolbarAction = (name) => {
     switch (name) {
@@ -188,21 +306,15 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
       case 'toggleAccountNodes': setShowAccountNodes(v => !v); break;
       case 'toggleClusters':     setShowClusters(v => !v); break;
       case 'toggleFlowView':     setViewMode(viewMode === 'sankey' ? 'force' : 'sankey'); break;
-      case 'openEdgeFilter':
-        setEdgeFilterOpen(o => !o);
-        if (timeWindowOpen) setTimeWindowOpen(false);
-        break;
-      case 'openTimeWindow':
-        setTimeWindowOpen(o => !o);
-        if (edgeFilterOpen) setEdgeFilterOpen(false);
-        break;
+      case 'openEdgeFilter':     openOne(edgeFilterOpen  ? null : 'edgeFilter');  break;
+      case 'openTimeWindow':     openOne(timeWindowOpen  ? null : 'timeWindow');  break;
       case 'toggleMultiSelect':
         if (multiSelectMode) exitMultiSelectMode();
         else { setSelected(null); setMultiSelectMode(true); }
         break;
-      case 'captureEvidence':    /* deferred — PR 5 */ break;
-      case 'exportPng':          /* deferred — PR 5 */ break;
-      case 'saveView':           /* deferred — PR 5 */ break;
+      case 'captureEvidence':    handleCaptureEvidence(); break;
+      case 'exportPng':          handleExportPng();       break;
+      case 'saveView':           openOne(savedViewsOpen ? null : 'savedViews'); break;
       default: break;
     }
   };
@@ -267,7 +379,7 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
         <GraphToolbar
           state={{
             showEdgeLabels, showAccountNodes, showClusters,
-            viewMode, multiSelectMode
+            viewMode, multiSelectMode, hasSavedView
           }}
           counterpartyCount={counterpartyCount}
           activeEdgeFilterCount={activeEdgeFilterCount}
@@ -294,6 +406,13 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
             bounds={data?.meta?.dataDateRange || null}
             onApply={(window) => setTimeWindow(window)}
             onClose={() => setTimeWindowOpen(false)}
+          />
+          <GraphSavedViewsPanel
+            open={savedViewsOpen}
+            customerId={currentCustomerId}
+            buildSnapshot={buildViewSnapshot}
+            onApply={applyViewSnapshot}
+            onClose={() => { setSavedViewsOpen(false); setSavedViewsRev(r => r + 1); }}
           />
 
           <GraphCanvas
@@ -345,6 +464,24 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
             onClearSubgraphFilter={() => setSubgraphFilter(null)}
           />
         </div>
+
+        {/* Lightweight toast for export / evidence / saved-view feedback.
+            Auto-dismisses; clickable to dismiss early. */}
+        {toast && (
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className={`absolute bottom-4 left-1/2 -translate-x-1/2 z-[70] text-[11px] font-semibold rounded-md px-3 py-1.5 shadow-md border ${
+              toast.kind === 'success'
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                : toast.kind === 'error'
+                  ? 'bg-red-50 border-red-300 text-red-800'
+                  : 'bg-blue-50 border-blue-300 text-blue-800'
+            }`}
+          >
+            {toast.text}
+          </button>
+        )}
 
         {/* Right-click context menu. Rendered at the modal top level so its
             page-absolute positioning sits above the canvas + side panel. */}

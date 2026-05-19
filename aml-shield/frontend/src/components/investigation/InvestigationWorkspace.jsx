@@ -1268,6 +1268,7 @@ function LinkedCasesTab({ alert }) {
         <EntityGraphModal
           customerId={alert.customer_id}
           customerName={alert.customer_name || alert.customer_id}
+          alertId={alert.alert_id}
           onClose={() => setGraphOpen(false)}
         />
       )}
