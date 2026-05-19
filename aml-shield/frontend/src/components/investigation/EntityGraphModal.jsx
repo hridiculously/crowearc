@@ -28,6 +28,7 @@ import GraphCanvas from './GraphCanvas.jsx';
 import GraphRightPanel from './GraphRightPanel.jsx';
 import GraphToolbar from './GraphToolbar.jsx';
 import GraphEdgeFilterPanel from './GraphEdgeFilterPanel.jsx';
+import GraphTimeWindowPanel from './GraphTimeWindowPanel.jsx';
 import { useGraphData } from './hooks/useGraphData.js';
 import { useGraphFilters } from './hooks/useGraphFilters.js';
 import { useGraphSimulation } from './hooks/useGraphSimulation.js';
@@ -53,6 +54,7 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
 
   const [timeWindow, setTimeWindow] = useState(null);   // { from, to } or null
   const [edgeFilterOpen, setEdgeFilterOpen] = useState(false);
+  const [timeWindowOpen, setTimeWindowOpen] = useState(false);
 
   const fetchParams = useMemo(() => ({
     from: timeWindow?.from || null,
@@ -137,13 +139,15 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
         exitMultiSelectMode();
       } else if (edgeFilterOpen) {
         setEdgeFilterOpen(false);
+      } else if (timeWindowOpen) {
+        setTimeWindowOpen(false);
       } else {
         onClose && onClose();
       }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [multiSelectMode, edgeFilterOpen, exitMultiSelectMode, onClose]);
+  }, [multiSelectMode, edgeFilterOpen, timeWindowOpen, exitMultiSelectMode, onClose]);
 
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -184,8 +188,14 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
       case 'toggleAccountNodes': setShowAccountNodes(v => !v); break;
       case 'toggleClusters':     setShowClusters(v => !v); break;
       case 'toggleFlowView':     setViewMode(viewMode === 'sankey' ? 'force' : 'sankey'); break;
-      case 'openEdgeFilter':     setEdgeFilterOpen(o => !o); break;
-      case 'openTimeWindow':     /* deferred to a follow-up PR */ break;
+      case 'openEdgeFilter':
+        setEdgeFilterOpen(o => !o);
+        if (timeWindowOpen) setTimeWindowOpen(false);
+        break;
+      case 'openTimeWindow':
+        setTimeWindowOpen(o => !o);
+        if (edgeFilterOpen) setEdgeFilterOpen(false);
+        break;
       case 'toggleMultiSelect':
         if (multiSelectMode) exitMultiSelectMode();
         else { setSelected(null); setMultiSelectMode(true); }
@@ -267,14 +277,23 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
 
         {/* Body: graph (70%) + details (30%) */}
         <div className="flex-1 flex min-h-0 relative">
-          {/* Edge filter popover lives at body-relative position so it
-              floats above the canvas at the top-left corner. */}
+          {/* Toolbar popovers (edge filter + time window) live at
+              body-relative position so they float above the canvas at
+              the top-left corner. Only one is open at a time — see the
+              toolbar action router. */}
           <GraphEdgeFilterPanel
             open={edgeFilterOpen}
             edgeFilters={edgeFilters}
             onChange={updateEdgeFilter}
             onReset={resetEdgeFilters}
             onClose={() => setEdgeFilterOpen(false)}
+          />
+          <GraphTimeWindowPanel
+            open={timeWindowOpen}
+            value={timeWindow}
+            bounds={data?.meta?.dataDateRange || null}
+            onApply={(window) => setTimeWindow(window)}
+            onClose={() => setTimeWindowOpen(false)}
           />
 
           <GraphCanvas
@@ -298,6 +317,7 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
             onNodeContext={onNodeContext}
             multiSelectMode={multiSelectMode}
             multiSelectedIds={multiSelectNodes}
+            showEdgeLabels={showEdgeLabels}
             filter={filter}
             filterReset={filterReset}
             navHistory={navHistory}

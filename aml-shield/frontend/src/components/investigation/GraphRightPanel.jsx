@@ -17,11 +17,12 @@
 import { useMemo } from 'react';
 import {
   Network, Flame, ExternalLink, Building2, FileText, ShieldAlert, Users,
-  MousePointer2, X, GitMerge
+  MousePointer2, X, GitMerge, CreditCard
 } from 'lucide-react';
 import EntityAlertTimeline from './EntityAlertTimeline.jsx';
 import {
-  COLORS, initialsOf, fmtMoney, riskTone, priorityTone
+  COLORS, initialsOf, fmtMoney, riskTone, priorityTone,
+  computeRiskScore, riskScoreTone
 } from './graphHelpers.js';
 
 // ─── Timeline derivation ────────────────────────────────────────────────
@@ -172,6 +173,8 @@ export default function GraphRightPanel({
             <AlertDetails node={node} userRole={userRole} userName={userName} rolePrefix={rolePrefix} customerId={customerId} />
           ) : node.type === 'SAR' ? (
             <SarDetails node={node} userRole={userRole} rolePrefix={rolePrefix} />
+          ) : node.type === 'ACCOUNT' ? (
+            <AccountDetails node={node} data={data} />
           ) : node.is_counterparty ? (
             <CounterpartyDetails node={node} data={data} adjacency={adjacency} userRole={userRole} />
           ) : (
@@ -517,6 +520,7 @@ function CustomerDetails({ node, data, adjacency, userRole, rolePrefix, customer
             {node.is_high_risk_country && <Chip tone="orange">High Risk Country</Chip>}
           </div>
         )}
+        <RiskScoreBar score={computeRiskScore(node)} />
       </Section>
 
       <Section title="Key facts">
@@ -597,7 +601,8 @@ function CounterpartyDetails({ node, data, adjacency, userRole }) {
             {node.risk_indicators?.sanctions_hit && <Chip tone="red">SANCTIONS HIT</Chip>}
             {node.risk_indicators?.high_risk_jurisdiction && <Chip tone="orange">HIGH-RISK JURISDICTION</Chip>}
           </div>
-          <div className="text-[10px] text-slate-500 font-mono break-all">{node.counterparty_id}</div>
+          <RiskScoreBar score={computeRiskScore(node)} />
+          <div className="mt-2 text-[10px] text-slate-500 font-mono break-all">{node.counterparty_id}</div>
         </Section>
       )}
 
@@ -658,6 +663,54 @@ function CounterpartyDetails({ node, data, adjacency, userRole }) {
           </div>
         </Section>
       )}
+    </div>
+  );
+}
+
+// ─── Account details (when includeAccounts=true) ────────────────────────
+function AccountDetails({ node, data }) {
+  // Count the counterparties this account transacts with, by walking the
+  // TRANSACTS_VIA links from this account.
+  const cpCount = useMemo(() => {
+    if (!data?.links) return 0;
+    const set = new Set();
+    for (const l of data.links) {
+      if (l.type !== 'TRANSACTS_VIA') continue;
+      const s = typeof l.source === 'object' ? l.source.id : l.source;
+      const t = typeof l.target === 'object' ? l.target.id : l.target;
+      if (s === node.id) set.add(t);
+      if (t === node.id) set.add(s);
+    }
+    return set.size;
+  }, [data, node.id]);
+
+  const inactive = node.status && node.status !== 'Active';
+
+  return (
+    <div className="p-5 space-y-5">
+      <div className="flex items-start gap-3">
+        <div
+          className="w-12 h-12 rounded-md inline-flex items-center justify-center text-white shrink-0"
+          style={{ background: COLORS.ACCOUNT }}
+        >
+          <CreditCard size={20} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-bold text-navy-900 font-mono">{node.label}</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">Account</div>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {node.account_type && <Chip tone="slate">{node.account_type}</Chip>}
+            {node.currency && <Chip tone="slate-soft">{node.currency}</Chip>}
+            {inactive && <Chip tone="amber">{node.status}</Chip>}
+          </div>
+        </div>
+      </div>
+
+      <Section title="Activity">
+        <KV k="Transactions" v={node.txn_count ?? '—'} />
+        <KV k="Total volume" v={fmtMoney(node.total_volume)} />
+        <KV k="Counterparties via this account" v={cpCount} />
+      </Section>
     </div>
   );
 }
@@ -779,6 +832,40 @@ function KV({ k, v }) {
     <div className="flex items-start justify-between gap-2">
       <span className="text-slate-500 shrink-0">{k}</span>
       <span className="text-navy-900 font-medium text-right break-words">{v == null || v === '' ? '—' : v}</span>
+    </div>
+  );
+}
+
+// Risk score bar — 0-100 rolled up from sanctions / PEP / hub / OFAC /
+// jurisdiction signals (counterparties) or the customer's assigned risk
+// tier (PERSON / COMPANY). Hidden when the helper returns null.
+function RiskScoreBar({ score }) {
+  if (score == null) return null;
+  const tone = riskScoreTone(score);
+  const fillCls = {
+    red:    'bg-red-500',
+    orange: 'bg-orange-500',
+    amber:  'bg-amber-400',
+    slate:  'bg-slate-400'
+  }[tone] || 'bg-slate-400';
+  const labelCls = {
+    red:    'text-red-700',
+    orange: 'text-orange-700',
+    amber:  'text-amber-700',
+    slate:  'text-slate-600'
+  }[tone] || 'text-slate-600';
+  return (
+    <div className="mt-2">
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+        <span>Risk score</span>
+        <span className={`font-bold ${labelCls}`}>{score}/100</span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
+        <div
+          className={`h-full ${fillCls}`}
+          style={{ width: `${Math.max(0, Math.min(100, score))}%` }}
+        />
+      </div>
     </div>
   );
 }

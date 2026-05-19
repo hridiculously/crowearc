@@ -24,7 +24,8 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { Network, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
 import {
   COLORS, NODE_RADIUS, radiusFor, isPhaseBCounterparty,
-  truncateLabel, fmtVolumeShort, fmtMoney, shouldShowHoverLabel
+  truncateLabel, fmtVolumeShort, fmtMoney, shouldShowHoverLabel,
+  computeRiskScore, riskScoreCanvasColor
 } from './graphHelpers.js';
 
 // Lazy-loaded so the graph library (~150KB) doesn't ship in the main bundle.
@@ -56,6 +57,8 @@ export default function GraphCanvas({
   // Multi-select
   multiSelectMode = false,
   multiSelectedIds = null,
+  // View toggles
+  showEdgeLabels = false,
   // Overlay state
   filter,
   filterReset,
@@ -123,7 +126,15 @@ export default function GraphCanvas({
             }}
             linkColor={(l) => linkColor(l, selected)}
             linkWidth={(l) => linkWidth(l)}
-            linkLineDash={(l) => l.computed ? [3, 3] : null}
+            linkLineDash={(l) => linkDash(l)}
+            // Edge label overlay — only fires when the toolbar toggle is
+            // on. Labels are zoom-gated (>= 1.0) so we don't drown the
+            // canvas at fit-to-view.
+            linkCanvasObjectMode={() => showEdgeLabels ? 'after' : undefined}
+            linkCanvasObject={(link, ctx, globalScale) => {
+              if (!showEdgeLabels) return;
+              drawLinkLabel(link, ctx, globalScale, selected);
+            }}
             // Money-flow direction. Larger arrows (6px) sit at the
             // target end so the eye lands on the receiving entity.
             // Particles animate in the same direction; their count
@@ -245,7 +256,7 @@ export default function GraphCanvas({
   );
 }
 
-// ─── Edge color / width helpers ─────────────────────────────────────────
+// ─── Edge color / width / dash helpers ──────────────────────────────────
 function linkColor(l, selected) {
   const dimmed = selected && !linkTouchesSelected(l, selected);
   if (dimmed) return 'rgba(148, 163, 184, 0.15)';
@@ -253,13 +264,84 @@ function linkColor(l, selected) {
   if (l.type === 'CO_OCCURS_WITH') return '#CBD5E1';
   if (l.type === 'APPEARS_IN')     return '#3B82F6';
   if (l.type === 'FILED_BY' || l.type === 'SUBJECT_OF') return '#A32D2D';
+  // Account-ownership / via-account edges (when includeAccounts=true).
+  if (l.type === 'HOLDS_ACCOUNT')   return '#185FA5';
+  if (l.type === 'TRANSACTS_VIA')   return '#94A3B8';
   return '#94A3B8';
 }
 
 function linkWidth(l) {
   if (l.type === 'TRANSACTS_WITH') return l.alerted ? 2 : 1;
   if (l.type === 'CO_OCCURS_WITH') return 0.5;
+  if (l.type === 'HOLDS_ACCOUNT')  return 1.5;
+  if (l.type === 'TRANSACTS_VIA')  return 0.75;
   return 1;
+}
+
+function linkDash(l) {
+  // computed = co-occurrence inference (Phase A backfill). Keep dashed
+  // so analysts know it's derived. HOLDS_ACCOUNT also dashes so it
+  // reads visually as structural rather than behavioural.
+  if (l.computed) return [3, 3];
+  if (l.type === 'HOLDS_ACCOUNT') return [4, 3];
+  return null;
+}
+
+// ─── Edge label drawing ─────────────────────────────────────────────────
+// Renders a compact "$X · n txn" pill at the midpoint of TRANSACTS_WITH
+// edges (and only those — co-occurrence / account-ownership / SAR edges
+// have no $ amount to show). Hidden on dimmed edges and at very low
+// zoom so the canvas doesn't drown.
+function drawLinkLabel(link, ctx, globalScale, selected) {
+  if (globalScale < 0.9) return;
+  if (link.type !== 'TRANSACTS_WITH') return;
+  if (selected && !linkTouchesSelected(link, selected)) return;
+  // Source/target may be string-IDs early in the simulation; once d3
+  // hydrates them they're objects with x/y.
+  const sx = link.source?.x, sy = link.source?.y;
+  const tx = link.target?.x, ty = link.target?.y;
+  if (sx == null || sy == null || tx == null || ty == null) return;
+
+  const cnt = Number(link.txn_count) || 0;
+  const amt = Number(link.total_amount) || 0;
+  if (cnt === 0 && amt === 0) return;
+
+  const label = `${shortMoney(amt)} · ${cnt} txn`;
+  const mx = (sx + tx) / 2;
+  const my = (sy + ty) / 2;
+  const fontSize = Math.max(8, 9 / globalScale);
+  ctx.font = `${fontSize}px Inter, sans-serif`;
+  const metrics = ctx.measureText(label);
+  const padX = 4, padY = 1.5;
+  const w = metrics.width + padX * 2;
+  const h = fontSize + padY * 2;
+  const x = mx - w / 2;
+  const y = my - h / 2;
+  ctx.save();
+  ctx.globalAlpha = 0.95;
+  ctx.fillStyle = link.alerted ? 'rgba(254, 226, 226, 0.95)' : 'rgba(248, 250, 252, 0.95)';
+  ctx.strokeStyle = link.alerted ? 'rgba(220, 38, 38, 0.5)' : 'rgba(203, 213, 225, 0.7)';
+  ctx.lineWidth = 0.75;
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 3);
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+  }
+  ctx.fillStyle = link.alerted ? '#991B1B' : '#475569';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, mx, my);
+  ctx.restore();
+}
+
+function shortMoney(v) {
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000)     return `$${(v / 1_000).toFixed(0)}K`;
+  return `$${Math.round(v)}`;
 }
 
 function linkTouchesSelected(link, selected) {
@@ -294,7 +376,10 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  // Body. Phase B counterparties are drawn as a rotated square (diamond).
+  // Body. Phase B counterparties are drawn as a rotated square (diamond);
+  // ACCOUNT nodes as a rounded square (structural, not behavioural);
+  // everything else as a circle.
+  const isAccount = node.type === 'ACCOUNT';
   ctx.beginPath();
   if (phaseB) {
     ctx.moveTo(node.x,     node.y - r);
@@ -302,11 +387,30 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.lineTo(node.x,     node.y + r);
     ctx.lineTo(node.x - r, node.y);
     ctx.closePath();
+  } else if (isAccount) {
+    // Rounded square. Closed account → dimmer fill + dashed border.
+    const halfR = r;
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(node.x - halfR, node.y - halfR, halfR * 2, halfR * 2, 3);
+    } else {
+      ctx.rect(node.x - halfR, node.y - halfR, halfR * 2, halfR * 2);
+    }
   } else {
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
   }
   ctx.fillStyle = color;
   ctx.fill();
+  if (isAccount) {
+    ctx.lineWidth = 1;
+    if (node.status && node.status !== 'Active') {
+      ctx.setLineDash([3, 2]);
+      ctx.strokeStyle = '#94A3B8';
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   // Hub ring — fires when this counterparty transacts with 3+ ARC
   // customers. Visible at zoom ≥ 0.4. The single most important AML
@@ -374,6 +478,32 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.lineWidth = 2.5;
     ctx.strokeStyle = '#F59E0B';
     ctx.stroke();
+  }
+
+  // Risk-score badge — small circle in the upper-right of the node
+  // when the computed score is meaningful (>= 55) or the node is the
+  // current selection. Hidden at far-out zoom to avoid clutter.
+  const isNodeSelected = selected && selected.id === node.id;
+  const score = computeRiskScore(node);
+  if (score != null && (score >= 55 || isNodeSelected) && globalScale >= 0.6) {
+    const badgeR = Math.max(5, Math.min(7, r * 0.5));
+    const bx = node.x + r - 1;
+    const by = node.y - r + 1;
+    ctx.beginPath();
+    ctx.arc(bx, by, badgeR, 0, 2 * Math.PI, false);
+    ctx.fillStyle = riskScoreCanvasColor(score);
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+    ctx.stroke();
+    if (globalScale >= 1.1) {
+      const f = Math.max(7, 8 / globalScale);
+      ctx.font = `bold ${f}px Inter, sans-serif`;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(score), bx, by);
+    }
   }
 
   // Label rules.
@@ -478,6 +608,7 @@ function GraphLegend({ open, onToggle }) {
             <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Node types</div>
             <LegendDot color={COLORS.PERSON}  label="Person (customer)" />
             <LegendDot color={COLORS.COMPANY} label="Company / Counterparty" />
+            <LegendDot color={COLORS.ACCOUNT} label="Account" shape="square" />
             <LegendDot color={COLORS.SAR}     label="SAR Filing" />
           </div>
           <div>
@@ -492,10 +623,11 @@ function GraphLegend({ open, onToggle }) {
   );
 }
 
-function LegendDot({ color, label }) {
+function LegendDot({ color, label, shape }) {
+  const shapeCls = shape === 'square' ? 'rounded-sm' : 'rounded-full';
   return (
     <div className="inline-flex items-center gap-1.5 mr-3 mb-0.5 w-full">
-      <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+      <span className={`inline-block w-2.5 h-2.5 shrink-0 ${shapeCls}`} style={{ backgroundColor: color }} />
       <span className="text-slate-700">{label}</span>
     </div>
   );

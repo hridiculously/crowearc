@@ -30,6 +30,7 @@ export const NODE_RADIUS = {
   NEIGHBOUR:    10,
   CASE:         8,
   SAR:          8,
+  ACCOUNT:      7,
   DEFAULT:      8
 };
 
@@ -50,6 +51,7 @@ export function radiusFor(node) {
   if (node.is_neighbour) return NODE_RADIUS.NEIGHBOUR;
   if (node.type === 'CASE') return NODE_RADIUS.CASE;
   if (node.type === 'SAR') return NODE_RADIUS.SAR;
+  if (node.type === 'ACCOUNT') return NODE_RADIUS.ACCOUNT;
   return NODE_RADIUS.DEFAULT;
 }
 
@@ -124,4 +126,57 @@ export function priorityTone(priority) {
     case 'Low':    return 'slate';
     default:       return 'slate';
   }
+}
+
+// ─── Risk score (0–100) ────────────────────────────────────────────────
+// Used by the canvas badge + right-panel bar. Customers use their server-
+// assigned risk rating mapped to a numeric tier. Counterparties roll up
+// from the risk_indicators object + OFAC + hub-popularity signals.
+// Returns null when the node is not a customer / counterparty.
+export function computeRiskScore(node) {
+  if (!node) return null;
+  // Customers (PERSON / COMPANY without is_counterparty)
+  if ((node.type === 'PERSON' || node.type === 'COMPANY') && !node.is_counterparty) {
+    if (node.sanctions) return 95;
+    switch (node.risk) {
+      case 'Very High': return 90;
+      case 'High':      return 75;
+      case 'Medium':    return 50;
+      case 'Low':       return 20;
+      default:          return null;
+    }
+  }
+  // Counterparties
+  if (node.is_counterparty) {
+    let s = 5;                                       // baseline
+    if (node.risk_indicators?.sanctions_hit)         s = Math.max(s, 100);
+    if (node.ofac_flagged)                           s = Math.max(s, 100);
+    if (node.risk_indicators?.pep)                   s = Math.max(s, 80);
+    if (node.risk_indicators?.high_risk_jurisdiction) s = Math.max(s, 70);
+    if (node.is_high_risk_country)                   s = Math.max(s, 55);
+    if (Number(node.shared_with_customer_count) >= 5) s = Math.max(s, 50);
+    else if (Number(node.shared_with_customer_count) >= 3) s = Math.max(s, 35);
+    if (Number(node.alerted_txn_count) > 0)          s = Math.max(s, 60);
+    return s;
+  }
+  return null;
+}
+
+// Risk tier → tailwind tone bucket. Used by the right-panel chip / bar.
+export function riskScoreTone(score) {
+  if (score == null) return 'slate';
+  if (score >= 80) return 'red';
+  if (score >= 55) return 'orange';
+  if (score >= 30) return 'amber';
+  return 'slate';
+}
+
+// Canvas-side colour (badge fill) — matches riskScoreTone but with
+// explicit hex so the canvas doesn't have to round-trip through CSS.
+export function riskScoreCanvasColor(score) {
+  if (score == null) return null;
+  if (score >= 80) return '#DC2626';
+  if (score >= 55) return '#F97316';
+  if (score >= 30) return '#F59E0B';
+  return '#64748B';
 }
