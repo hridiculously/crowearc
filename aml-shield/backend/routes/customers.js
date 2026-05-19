@@ -263,6 +263,22 @@ router.get('/:id/graph', async (req, res, next) => {
     const CASE_LIMIT = 8;
     const NEIGHBOUR_LIMIT = 6;
 
+    // C-10 follow-up sprint Part 1:
+    //
+    //   ?from=YYYY-MM-DD&to=YYYY-MM-DD — windows transaction-derived
+    //     queries to a date range. NULL on either side means "open".
+    //     Used by the front-end time-window slider; we also emit the
+    //     resolved from/to and the data's natural min/max date range
+    //     on meta so the slider knows its bounds.
+    //
+    //   ?includeAccounts=true — emits ACCOUNT typed nodes (one per row
+    //     in the accounts table belonging to the focus customer) and
+    //     HOLDS_ACCOUNT / TRANSACTS_VIA edges. Default false to keep
+    //     the canvas legible.
+    const windowFrom = req.query.from ? String(req.query.from).slice(0, 10) : null;
+    const windowTo   = req.query.to   ? String(req.query.to).slice(0, 10)   : null;
+    const includeAccounts = req.query.includeAccounts === 'true' || req.query.includeAccounts === '1';
+
     // ── 1. Focus customer (one node, always present)
     // Extra columns (customer_since_date, cdd_level, job_title, industry)
     // power the redesigned right-side detail panel. The real schema uses
@@ -303,6 +319,9 @@ router.get('/:id/graph', async (req, res, next) => {
     // Directional flow aggregates power the arrow direction on the canvas.
     // txn_type = 'Debit' is money leaving the customer (outflow → customer
     // SENDS); 'Credit' is money arriving (inflow → customer RECEIVES).
+    // Both Phase A + Phase B accept the optional from/to date window
+    // via params $3, $4. NULL params are short-circuited inline so the
+    // existing index plan stays valid when no window is applied.
     const cpRes = graphPhase === 'entity_fk'
       ? await pool.query(
           `SELECT cp.id                                                 AS counterparty_id,
@@ -325,11 +344,13 @@ router.get('/:id/graph', async (req, res, next) => {
              JOIN counterparties cp ON cp.id = t.counterparty_id
             WHERE t.customer_id = $1
               AND cp.is_merged_away = FALSE
+              AND ($3::text IS NULL OR t.txn_date >= $3)
+              AND ($4::text IS NULL OR t.txn_date <= $4)
             GROUP BY cp.id, cp.canonical_name, cp.counterparty_type,
                      cp.risk_indicators, cp.transaction_count, cp.total_volume
             ORDER BY COUNT(t.*) DESC, SUM(t.amount) DESC
             LIMIT $2`,
-          [customerId, COUNTERPARTY_LIMIT]
+          [customerId, COUNTERPARTY_LIMIT, windowFrom, windowTo]
         )
       : await pool.query(
           // Phase A: no MAX(counterparty_id) aggregate — Postgres has no
@@ -351,10 +372,12 @@ router.get('/:id/graph', async (req, res, next) => {
               AND counterparty IS NOT NULL
               AND TRIM(counterparty) <> ''
               AND counterparty_normalised IS NOT NULL
+              AND ($3::text IS NULL OR txn_date >= $3)
+              AND ($4::text IS NULL OR txn_date <= $4)
             GROUP BY counterparty_normalised
             ORDER BY COUNT(*) DESC, SUM(amount) DESC
             LIMIT $2`,
-          [customerId, COUNTERPARTY_LIMIT]
+          [customerId, COUNTERPARTY_LIMIT, windowFrom, windowTo]
         );
 
     // ── 3. Recent alerts (cases in graph terms) — keep recent + open ones.
@@ -415,9 +438,11 @@ router.get('/:id/graph', async (req, res, next) => {
               AND t2.customer_id <> $1
               AND t1.counterparty_id IS NOT NULL
               AND cp.is_merged_away = FALSE
+              AND ($3::text IS NULL OR t1.txn_date >= $3)
+              AND ($4::text IS NULL OR t1.txn_date <= $4)
             ORDER BY t2.customer_id
             LIMIT $2`,
-          [customerId, NEIGHBOUR_LIMIT]
+          [customerId, NEIGHBOUR_LIMIT, windowFrom, windowTo]
         )
       : await pool.query(
           `SELECT DISTINCT ON (t2.customer_id)
@@ -435,10 +460,187 @@ router.get('/:id/graph', async (req, res, next) => {
              JOIN customers c ON c.customer_id = t2.customer_id
             WHERE t1.customer_id = $1
               AND t2.customer_id <> $1
+              AND ($3::text IS NULL OR t1.txn_date >= $3)
+              AND ($4::text IS NULL OR t1.txn_date <= $4)
             ORDER BY t2.customer_id
             LIMIT $2`,
-          [customerId, NEIGHBOUR_LIMIT]
+          [customerId, NEIGHBOUR_LIMIT, windowFrom, windowTo]
         );
+
+    // ── 6. Data date range — used by the time-slider as track bounds. ──
+    // Pulled from the full transaction history (NOT windowed) so the
+    // slider always shows the customer's complete activity span.
+    let dataDateRange = null;
+    try {
+      const dr = await pool.query(
+        `SELECT MIN(NULLIF(txn_date, ''))::date AS earliest,
+                MAX(NULLIF(txn_date, ''))::date AS latest
+           FROM transactions WHERE customer_id = $1`,
+        [customerId]
+      );
+      const row = dr.rows[0];
+      if (row?.earliest || row?.latest) {
+        dataDateRange = {
+          earliest: row.earliest ? String(row.earliest).slice(0, 10) : null,
+          latest:   row.latest   ? String(row.latest).slice(0, 10)   : null
+        };
+      }
+    } catch (_e) { /* leave dataDateRange null */ }
+
+    // ── 7. Peer benchmarking. Compares the focus customer to peers in
+    //     the same industry (falling back to customer_type). Returns
+    //     median + p90 counterparty counts + median alert count plus
+    //     the focus customer's own numbers so the frontend can compute
+    //     percentile bars. Null when no peers exist or aggregation fails.
+    let peerBenchmark = null;
+    try {
+      const segCol = focus.industry ? 'industry' : 'customer_type';
+      const segVal = focus.industry || focus.customer_type;
+      if (segVal) {
+        const pb = await pool.query(
+          `SELECT
+             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cp_count)::float    AS median_cp,
+             PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY cp_count)::float    AS p90_cp,
+             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY alert_count)::float AS median_alerts,
+             COUNT(*)::int                                                   AS peer_count
+           FROM (
+             SELECT c.customer_id,
+                    COUNT(DISTINCT t.counterparty_normalised) AS cp_count,
+                    COUNT(DISTINCT a.alert_id)                AS alert_count
+               FROM customers c
+               LEFT JOIN transactions t ON t.customer_id = c.customer_id
+               LEFT JOIN alerts a       ON a.customer_id = c.customer_id
+              WHERE c.${segCol} = $2
+                AND c.customer_id <> $1
+              GROUP BY c.customer_id
+           ) peers`,
+          [customerId, segVal]
+        );
+        const r = pb.rows[0];
+        // Also fetch the focus customer's own totals for the comparison.
+        const focusTotals = await pool.query(
+          `SELECT
+             (SELECT COUNT(DISTINCT counterparty_normalised) FROM transactions WHERE customer_id = $1)::int AS focus_cp,
+             (SELECT COUNT(DISTINCT alert_id) FROM alerts WHERE customer_id = $1)::int                       AS focus_alerts`,
+          [customerId]
+        );
+        const ft = focusTotals.rows[0] || {};
+        if (Number(r?.peer_count) >= 5) {
+          peerBenchmark = {
+            segmentColumn: segCol,
+            segmentValue: segVal,
+            peerCount: Number(r.peer_count) || 0,
+            medianCounterparties: Number(r.median_cp) || 0,
+            p90Counterparties: Number(r.p90_cp) || 0,
+            medianAlerts: Number(r.median_alerts) || 0,
+            focusCounterpartyCount: Number(ft.focus_cp) || 0,
+            focusAlertCount: Number(ft.focus_alerts) || 0
+          };
+        }
+      }
+    } catch (_e) { /* leave peerBenchmark null */ }
+
+    // ── 8. Account-level rows. Emitted only when includeAccounts=true.
+    //     transactions.account_number joins to accounts.account_number
+    //     (the natural key — accounts.id is a SERIAL int but the txn
+    //     table doesn't reference it). HOLDS_ACCOUNT edges go from the
+    //     focus customer to each account; TRANSACTS_VIA edges go from
+    //     each account to the counterparty nodes it has transactions
+    //     with (joined via account_number).
+    let accountRows = [];
+    let accountCpRows = [];
+    if (includeAccounts) {
+      try {
+        const acctRes = await pool.query(
+          `SELECT a.id, a.account_number, a.account_type, a.currency, a.status,
+                  COUNT(t.*)::int                                          AS txn_count,
+                  ROUND(COALESCE(SUM(t.amount), 0)::numeric, 2)::float     AS total_volume
+             FROM accounts a
+             LEFT JOIN transactions t
+               ON t.account_number = a.account_number
+              AND ($2::text IS NULL OR t.txn_date >= $2)
+              AND ($3::text IS NULL OR t.txn_date <= $3)
+            WHERE a.customer_id = $1
+            GROUP BY a.id, a.account_number, a.account_type, a.currency, a.status
+            ORDER BY total_volume DESC NULLS LAST`,
+          [customerId, windowFrom, windowTo]
+        );
+        accountRows = acctRes.rows;
+
+        // Account → counterparty edges. Group by (account_number,
+        // counterparty_normalised) so each TRANSACTS_VIA edge carries
+        // the per-account txn count + volume. Only kept for
+        // counterparties that appear in the cpRes top-N — accounts
+        // that transact with off-canvas counterparties don't draw
+        // dangling edges.
+        const onCanvasCpKeys = new Set(cpRes.rows.map(r => r.counterparty_id || r.normalised_name));
+        const acctCp = await pool.query(
+          `SELECT t.account_number,
+                  t.counterparty_id,
+                  t.counterparty_normalised,
+                  COUNT(*)::int                                          AS txn_count,
+                  ROUND(SUM(t.amount)::numeric, 2)::float                AS total_amount
+             FROM transactions t
+            WHERE t.customer_id = $1
+              AND ($2::text IS NULL OR t.txn_date >= $2)
+              AND ($3::text IS NULL OR t.txn_date <= $3)
+            GROUP BY t.account_number, t.counterparty_id, t.counterparty_normalised`,
+          [customerId, windowFrom, windowTo]
+        );
+        accountCpRows = acctCp.rows.filter(r => {
+          const key = r.counterparty_id || r.counterparty_normalised;
+          return onCanvasCpKeys.has(key);
+        });
+      } catch (_e) {
+        accountRows = [];
+        accountCpRows = [];
+      }
+    }
+
+    // ── 9. Counterparty OFAC screening. Runs in parallel with the
+    //     other queries; failure is non-fatal (each counterparty just
+    //     gets ofac_screen_score: null). Reuses the Jaro-Winkler
+    //     implementation in utils/ofacScreener so we don't introduce
+    //     a second fuzzy-match dependency.
+    let ofacByCpKey = new Map();
+    try {
+      const { jaroWinkler } = require('../utils/ofacScreener');
+      const { getManagerSetting } = require('../utils/getManagerSetting');
+      const threshold = Number(await getManagerSetting('ofac.screen_threshold', 0.85)) || 0.85;
+      const sdnRows = (await pool.query(
+        `SELECT sdn_name, aka_names, program FROM ofac_sdn_entries`
+      )).rows;
+      const cpNames = cpRes.rows.map(r => ({
+        key: r.counterparty_id || r.normalised_name,
+        name: r.canonical_name || r.display_name || r.normalised_name || ''
+      }));
+      for (const cp of cpNames) {
+        if (!cp.name) continue;
+        const subject = String(cp.name).toUpperCase();
+        let best = null;
+        for (const sdn of sdnRows) {
+          const score = jaroWinkler(subject, String(sdn.sdn_name || '').toUpperCase());
+          if (!best || score > best.score) {
+            best = { score, name: sdn.sdn_name, program: sdn.program };
+          }
+          // AKA list — keep iteration light; only check up to 5 aliases per row.
+          const akas = Array.isArray(sdn.aka_names) ? sdn.aka_names.slice(0, 5) : [];
+          for (const aka of akas) {
+            const aScore = jaroWinkler(subject, String(aka || '').toUpperCase());
+            if (aScore > best.score) best = { score: aScore, name: sdn.sdn_name, program: sdn.program };
+          }
+        }
+        if (best && best.score >= 0.5) {
+          ofacByCpKey.set(cp.key, {
+            score: Math.round(best.score * 100) / 100,
+            match: String(best.name).slice(0, 60),
+            flagged: best.score >= threshold
+          });
+        }
+      }
+    } catch (_e) {
+      // ofac_sdn_entries may not exist on a fresh DB; leave map empty.
+    }
 
     // ── Build nodes + links ────────────────────────────────────────────
     const nodes = [];
@@ -486,6 +688,9 @@ router.get('/:id/graph', async (req, res, next) => {
         : {};
       const isHighRisk = !!(risk.pep || risk.sanctions_hit || risk.high_risk_jurisdiction);
 
+      // OFAC enrichment (best-effort).
+      const ofacHit = ofacByCpKey.get(cpKey);
+
       addNode({
         id: cpId,
         type: 'COMPANY',
@@ -503,13 +708,17 @@ router.get('/:id/graph', async (req, res, next) => {
         txn_count_with_focus: cp.txn_count,
         total_volume: isPhaseB ? Number(cp.global_total_volume) || cp.total_amount : cp.total_amount,
         risk_indicators: risk,
-        is_high_risk_counterparty: isHighRisk,
+        is_high_risk_counterparty: isHighRisk || !!ofacHit?.flagged,
         // shared_with_customer_count is capped at 99 for display (avoids
         // leaking the institution-wide customer count when the entity is
         // very popular).
         shared_with_customer_count: isPhaseB
           ? Math.min(99, Number(cp.shared_with_customer_count) || 0)
-          : 0
+          : 0,
+        // C-10 follow-up Part 1c: OFAC screening enrichment.
+        ofac_screen_score: ofacHit?.score ?? null,
+        ofac_screen_match: ofacHit?.match ?? null,
+        ofac_flagged:      !!ofacHit?.flagged
       });
       // Money-flow direction. If the customer net-sends to the
       // counterparty (debits > credits) the arrow points customer →
@@ -686,6 +895,59 @@ router.get('/:id/graph', async (req, res, next) => {
       }
     }
 
+    // ── Account nodes + edges (only when includeAccounts=true). ────────
+    // HOLDS_ACCOUNT  : focus customer → account.
+    // TRANSACTS_VIA  : account → counterparty (only when the counterparty
+    //                  is already on the canvas, so we don't paint
+    //                  dangling stubs for off-canvas counterparties).
+    if (includeAccounts) {
+      const focusNodeId = `c-${focus.customer_id}`;
+      for (const acct of accountRows) {
+        const acctId = `acc-${acct.id}`;
+        const masked = acct.account_number
+          ? `****${String(acct.account_number).slice(-4)}`
+          : `acct-${acct.id}`;
+        addNode({
+          id: acctId,
+          type: 'ACCOUNT',
+          label: masked,
+          account_id: acct.id,
+          account_number: acct.account_number || null,
+          account_type: acct.account_type || null,
+          currency: acct.currency || null,
+          status: acct.status || null,
+          customer_id: focus.customer_id,
+          txn_count: Number(acct.txn_count) || 0,
+          total_volume: Number(acct.total_volume) || 0
+        });
+        links.push({
+          source: focusNodeId,
+          target: acctId,
+          type: 'HOLDS_ACCOUNT'
+        });
+      }
+      // TRANSACTS_VIA — translate (account_number, counterparty_id|normalised_name)
+      // pairs into account → counterparty edges.
+      const acctNodeIdByNumber = new Map(
+        accountRows.map(a => [a.account_number, `acc-${a.id}`])
+      );
+      for (const row of accountCpRows) {
+        const acctNodeId = acctNodeIdByNumber.get(row.account_number);
+        if (!acctNodeId) continue;
+        const cpKey = row.counterparty_id || row.counterparty_normalised;
+        if (!cpKey) continue;
+        const cpNodeId = `cp-${cpKey}`;
+        if (!seenNodes.has(cpNodeId)) continue;
+        links.push({
+          source: acctNodeId,
+          target: cpNodeId,
+          type: 'TRANSACTS_VIA',
+          txn_count: Number(row.txn_count) || 0,
+          total_amount: Number(row.total_amount) || 0
+        });
+      }
+    }
+
     res.json({
       focus_id: `c-${focus.customer_id}`,
       nodes,
@@ -699,7 +961,17 @@ router.get('/:id/graph', async (req, res, next) => {
         // C-10: tells the frontend which dedup layer the graph was built
         // from. 'normalised' = interim string-equality on the generated
         // column; 'entity_fk' = proper counterparty_id join.
-        graphPhase
+        graphPhase,
+        // C-10 follow-up Part 1 (sprint):
+        // Time-window state echoed back so the slider knows where its
+        // handles should sit on load.
+        windowFrom,
+        windowTo,
+        dataDateRange,
+        // Peer benchmarking (null when no peer cohort exists).
+        peerBenchmark,
+        // Account-node visibility flag for the toolbar's account toggle.
+        includeAccounts
       }
     });
   } catch (err) { next(err); }
