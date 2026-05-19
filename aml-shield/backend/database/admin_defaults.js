@@ -61,6 +61,11 @@ const MANAGER_DEFAULTS = {
   'audit.session_timeout_min': 30,
   'audit.export_requires_confirm': true,
 
+  // Counterparty OFAC screening threshold (Jaro-Winkler similarity, 0–1).
+  // Matches in the graph endpoint with score ≥ this are flagged. Default
+  // 0.85 mirrors the existing utils/ofacScreener.js DEFAULT_THRESHOLD.
+  'ofac.screen_threshold': 0.85,
+
   // C-04: hours since the last successful OFAC SDN sync before the
   // staleness banner appears. Default of 26 = 24h cadence + 2h grace.
   // Recommended range 25-48; UI enforces a 24h floor and 168h (one week)
