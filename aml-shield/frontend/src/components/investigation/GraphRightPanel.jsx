@@ -14,10 +14,10 @@
 // props (data, adjacency, userRole, etc.) and render. None of them fetch.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Network, Flame, ExternalLink, Building2, FileText, ShieldAlert, Users,
-  MousePointer2, X, GitMerge, CreditCard
+  MousePointer2, X, GitMerge, CreditCard, StickyNote, Trash2, Plus
 } from 'lucide-react';
 import EntityAlertTimeline from './EntityAlertTimeline.jsx';
 import {
@@ -99,7 +99,9 @@ export default function GraphRightPanel({
   onClearMultiSelect,
   onBuildSubgraph,
   subgraphFilter = null,
-  onClearSubgraphFilter
+  onClearSubgraphFilter,
+  // Annotations (Part 12) — { byTargetKey, addAnnotation, removeAnnotation, enabled, ... }
+  annotations = null
 }) {
   const { alerts: timelineAlerts, sars: timelineSars } = useMemo(
     () => deriveTimeline(data, node),
@@ -181,6 +183,15 @@ export default function GraphRightPanel({
             <CustomerDetails node={node} data={data} adjacency={adjacency} userRole={userRole} rolePrefix={rolePrefix} customerId={customerId} onRecenter={onRecenter} />
           )}
 
+          {annotations?.enabled && (
+            <AnnotationsForNode
+              nodeId={node.id}
+              nodeLabel={node.label || node.id}
+              annotations={annotations}
+              userName={userName}
+            />
+          )}
+
           <div className="mx-5 mt-4 pt-4 border-t border-gray-100 pb-5">
             {selectedEntityType === 'event' && (
               <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-2">
@@ -198,6 +209,159 @@ export default function GraphRightPanel({
         </>
       )}
     </aside>
+  );
+}
+
+// ─── Annotations for a selected node (Part 12) ─────────────────────────
+// Inline add form + a list of any pinned notes on this target. The
+// `annotations` prop is the full hook return value so this component can
+// call addAnnotation / removeAnnotation directly. The hook itself owns
+// the network + state plumbing.
+const ANNOTATION_COLORS = [
+  { value: '#F59E0B', label: 'Amber' },     // default
+  { value: '#DC2626', label: 'Red' },
+  { value: '#10B981', label: 'Green' },
+  { value: '#3B82F6', label: 'Blue' }
+];
+
+function AnnotationsForNode({ nodeId, nodeLabel, annotations, userName }) {
+  const [drafting, setDrafting] = useState(false);
+  const [text, setText] = useState('');
+  const [color, setColor] = useState(ANNOTATION_COLORS[0].value);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const list = useMemo(() => {
+    const arr = annotations?.byTargetKey?.get(nodeId) || [];
+    return [...arr].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }, [annotations, nodeId]);
+
+  const save = async () => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    setErr(null);
+    const result = await annotations.addAnnotation({
+      target_type: 'node',
+      target_id: nodeId,
+      text: trimmed,
+      color
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setErr(result.error || 'Save failed');
+      return;
+    }
+    setText('');
+    setDrafting(false);
+  };
+
+  const remove = async (id) => {
+    const r = await annotations.removeAnnotation(id);
+    if (!r.ok) setErr(r.error || 'Delete failed');
+  };
+
+  return (
+    <div className="mx-5 mt-4 pt-4 border-t border-gray-100">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[10px] uppercase tracking-wider text-slate-500 inline-flex items-center gap-1">
+          <StickyNote size={11} /> Annotations ({list.length})
+        </div>
+        {!drafting && (
+          <button
+            type="button"
+            onClick={() => setDrafting(true)}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 hover:text-blue-900"
+          >
+            <Plus size={11} /> Add note
+          </button>
+        )}
+      </div>
+
+      {drafting && (
+        <div className="border border-slate-200 rounded p-2 mb-2 bg-slate-50">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={`Pin a note on ${nodeLabel}…`}
+            rows={3}
+            maxLength={1000}
+            className="w-full text-[12px] px-2 py-1 border border-slate-300 rounded focus:outline-none focus:border-blue-500 bg-white"
+          />
+          <div className="mt-1.5 flex items-center justify-between gap-2">
+            <div className="inline-flex items-center gap-1">
+              {ANNOTATION_COLORS.map(c => (
+                <button
+                  key={c.value}
+                  type="button"
+                  onClick={() => setColor(c.value)}
+                  title={c.label}
+                  aria-label={c.label}
+                  className={`w-4 h-4 rounded-full border-2 ${color === c.value ? 'border-slate-900' : 'border-white'}`}
+                  style={{ backgroundColor: c.value }}
+                />
+              ))}
+            </div>
+            <div className="inline-flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => { setDrafting(false); setText(''); setErr(null); }}
+                disabled={busy}
+                className="text-[11px] px-2 py-1 rounded text-slate-600 hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={save}
+                disabled={busy || !text.trim()}
+                className={`text-[11px] px-2 py-1 rounded font-semibold ${
+                  busy || !text.trim()
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                    : 'bg-teal-600 hover:bg-teal-500 text-white'
+                }`}
+              >
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+          {err && <div className="mt-1.5 text-[10px] text-red-600">{err}</div>}
+        </div>
+      )}
+
+      {list.length === 0 ? (
+        <div className="text-[11px] text-slate-500 italic">
+          No notes pinned to this {nodeLabel ? `entity` : 'node'} yet.
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {list.map(a => (
+            <div
+              key={a.id}
+              className="text-[12px] border border-slate-200 rounded bg-white px-2.5 py-1.5 flex items-start gap-2"
+              style={{ borderLeft: `3px solid ${a.color || '#F59E0B'}` }}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="text-slate-700 break-words whitespace-pre-wrap">{a.text}</div>
+                <div className="mt-0.5 text-[10px] text-slate-400">
+                  {a.created_by || 'unknown'} · {new Date(a.created_at).toLocaleString()}
+                </div>
+              </div>
+              {(a.created_by === userName || userName === null) && (
+                <button
+                  type="button"
+                  onClick={() => remove(a.id)}
+                  title="Delete annotation"
+                  className="h-5 w-5 inline-flex items-center justify-center rounded text-slate-400 hover:bg-red-50 hover:text-red-600 shrink-0"
+                >
+                  <Trash2 size={11} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

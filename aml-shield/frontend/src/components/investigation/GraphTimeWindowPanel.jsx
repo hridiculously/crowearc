@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { useEffect, useState } from 'react';
-import { X, RotateCcw, Check } from 'lucide-react';
+import { X, RotateCcw, Check, GitCompare, ChevronDown, ChevronRight } from 'lucide-react';
 
 const QUICK_RANGES = [
   { label: 'Last 30 days',   days: 30 },
@@ -30,10 +30,18 @@ export default function GraphTimeWindowPanel({
   value,            // { from, to } | null
   bounds,           // { earliest, latest } | null  (data envelope)
   onApply,
-  onClose
+  onClose,
+  // Compare overlay (Part 11). Optional — when absent, the compare
+  // expander is hidden so callers that don't support diff aren't
+  // surprised by an unwired control.
+  compareValue = undefined,
+  onApplyCompare
 }) {
   const [from, setFrom] = useState(value?.from || '');
   const [to,   setTo]   = useState(value?.to   || '');
+  const [compareOpen, setCompareOpen] = useState(!!compareValue);
+  const [cmpFrom, setCmpFrom] = useState(compareValue?.from || '');
+  const [cmpTo,   setCmpTo]   = useState(compareValue?.to   || '');
 
   // Sync local draft when the popover opens with a different value (e.g.
   // analyst opened it twice, parent value changed in between).
@@ -41,7 +49,10 @@ export default function GraphTimeWindowPanel({
     if (!open) return;
     setFrom(value?.from || '');
     setTo(value?.to || '');
-  }, [open, value]);
+    setCmpFrom(compareValue?.from || '');
+    setCmpTo(compareValue?.to || '');
+    setCompareOpen(!!compareValue);
+  }, [open, value, compareValue]);
 
   if (!open) return null;
 
@@ -79,6 +90,18 @@ export default function GraphTimeWindowPanel({
   const clear = () => {
     setFrom(''); setTo('');
     onApply(null);
+  };
+
+  // ── Compare-mode actions ────────────────────────────────────────────
+  const cmpInvalid = !!(cmpFrom && cmpTo && cmpFrom > cmpTo);
+  const applyCompare = () => {
+    if (cmpInvalid) return;
+    if (!cmpFrom && !cmpTo) { onApplyCompare && onApplyCompare(null); return; }
+    onApplyCompare && onApplyCompare({ from: cmpFrom || null, to: cmpTo || null });
+  };
+  const clearCompare = () => {
+    setCmpFrom(''); setCmpTo('');
+    onApplyCompare && onApplyCompare(null);
   };
 
   return (
@@ -181,6 +204,71 @@ export default function GraphTimeWindowPanel({
             <Check size={12} /> Apply
           </button>
         </div>
+
+        {/* Compare expander (Part 11) — only mounted when the parent
+            wires onApplyCompare. Lets the analyst pin a second window
+            for a diff overlay; current window is treated as "A" and
+            the compare window as "B". */}
+        {onApplyCompare && (
+          <div className="border-t border-slate-100 pt-2">
+            <button
+              type="button"
+              onClick={() => setCompareOpen(o => !o)}
+              className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold hover:text-slate-700"
+              aria-expanded={compareOpen}
+            >
+              {compareOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+              <GitCompare size={11} />
+              Compare against another window {compareValue ? '· ACTIVE' : ''}
+            </button>
+            {compareOpen && (
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <DateField
+                  label="From (B)"
+                  value={cmpFrom}
+                  min={minDate}
+                  max={maxDate}
+                  invalid={cmpInvalid}
+                  onChange={setCmpFrom}
+                />
+                <DateField
+                  label="To (B)"
+                  value={cmpTo}
+                  min={minDate}
+                  max={maxDate}
+                  invalid={cmpInvalid}
+                  onChange={setCmpTo}
+                />
+                <div className="col-span-2 flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={clearCompare}
+                    className="text-[11px] text-slate-500 hover:text-slate-700"
+                  >
+                    Clear B
+                  </button>
+                  <button
+                    type="button"
+                    onClick={applyCompare}
+                    disabled={cmpInvalid}
+                    className={`text-[11px] inline-flex items-center gap-1 px-2 py-1 rounded font-semibold ${
+                      cmpInvalid
+                        ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                        : 'bg-violet-600 hover:bg-violet-500 text-white'
+                    }`}
+                  >
+                    <GitCompare size={11} /> Apply compare
+                  </button>
+                </div>
+                {cmpInvalid && (
+                  <div className="col-span-2 text-[10px] text-red-600">
+                    Compare-window From must be on or before To.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

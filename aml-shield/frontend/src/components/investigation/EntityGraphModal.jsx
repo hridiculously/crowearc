@@ -34,6 +34,9 @@ import { useGraphData } from './hooks/useGraphData.js';
 import { useGraphFilters } from './hooks/useGraphFilters.js';
 import { useGraphSimulation } from './hooks/useGraphSimulation.js';
 import { useGraphInteraction } from './hooks/useGraphInteraction.js';
+import { useGraphAnnotations, edgeKey } from './hooks/useGraphAnnotations.js';
+import { useCompareGraphData } from './hooks/useCompareGraphData.js';
+import { computeGraphDiff } from './graphDiff.js';
 import { readUser, rolePrefixFor } from './graphHelpers.js';
 import { captureCanvasPng, downloadPng, blobToFile } from './graphExport.js';
 import api from '../../api/client.js';
@@ -56,6 +59,8 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
   } = filters;
 
   const [timeWindow, setTimeWindow] = useState(null);   // { from, to } or null
+  // Compare window for the Part 11 diff overlay. Null = compare off.
+  const [compareWindow, setCompareWindow] = useState(null);
   const [edgeFilterOpen, setEdgeFilterOpen] = useState(false);
   const [timeWindowOpen, setTimeWindowOpen] = useState(false);
   const [savedViewsOpen, setSavedViewsOpen] = useState(false);
@@ -77,8 +82,21 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     data, error, currentCustomerId, navHistory, recenterOn, navigateBack
   } = useGraphData(customerId, fetchParams);
 
+  // Part 11 — second fetch for the compare window.
+  const { compareData, compareError, compareLoading } = useCompareGraphData(
+    currentCustomerId, compareWindow, showAccountNodes
+  );
+
+  // Merge the two snapshots when compare is on; otherwise pass the
+  // base graph through unchanged. The diff helper stamps _diffStatus
+  // on every node/link so the canvas can render adds/removes.
+  const mergedData = useMemo(
+    () => compareWindow ? computeGraphDiff(data, compareData) : data,
+    [data, compareData, compareWindow]
+  );
+
   const { displayData, adjacency, networkCounts } = useGraphSimulation(
-    data, filter, { edgeFilters, subgraphFilter }
+    mergedData, filter, { edgeFilters, subgraphFilter }
   );
 
   const {
@@ -86,19 +104,23 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     hoveredNode, setHoveredNode,
     hoveredLink, setHoveredLink,
     cursorPos, setCursorPos,
-    contextMenu, setContextMenu, onNodeContext
+    contextMenu, setContextMenu, onNodeContext,
+    pathHistory, pushToPath, clearPath
   } = useGraphInteraction();
+
+  // ── User identity (read once; needed by annotations + saved views) ──
+  const user = useMemo(() => readUser(), []);
+  const userRole = user?.role || null;
+  const userName = user?.name || null;
+  const rolePrefix = useMemo(() => rolePrefixFor(userRole), [userRole]);
+
+  // ── Annotations (Part 12) — scoped to alertId; no-op when null. ─────
+  const annotations = useGraphAnnotations(alertId, userName);
 
   // ── Local state for layout chrome ───────────────────────────────────
   const containerRef = useRef(null);
   const fgRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
-
-  // ── User identity (drives the role-aware deep links in the right panel) ─
-  const user = useMemo(() => readUser(), []);
-  const userRole = user?.role || null;
-  const userName = user?.name || null;
-  const rolePrefix = useMemo(() => rolePrefixFor(userRole), [userRole]);
 
   // ── Counterparty count drives the Flow View disable threshold ──────
   const counterpartyCount = useMemo(() => {
@@ -204,6 +226,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
       return;
     }
     setSelected(node || null);
+    if (node) pushToPath(node);
   };
 
   // ── Export / evidence helpers ──────────────────────────────────────
@@ -406,6 +429,8 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             bounds={data?.meta?.dataDateRange || null}
             onApply={(window) => setTimeWindow(window)}
             onClose={() => setTimeWindowOpen(false)}
+            compareValue={compareWindow}
+            onApplyCompare={(w) => setCompareWindow(w)}
           />
           <GraphSavedViewsPanel
             open={savedViewsOpen}
@@ -416,8 +441,12 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
           />
 
           <GraphCanvas
-            data={data}
+            data={mergedData || data}
             displayData={displayData}
+            compareActive={!!compareWindow}
+            compareWindow={compareWindow}
+            compareCounts={mergedData?.meta?.compareCounts || null}
+            onClearCompare={() => setCompareWindow(null)}
             adjacency={adjacency}
             isEmpty={isEmpty}
             error={error}
@@ -437,10 +466,18 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             multiSelectMode={multiSelectMode}
             multiSelectedIds={multiSelectNodes}
             showEdgeLabels={showEdgeLabels}
+            annotationsByKey={annotations.byTargetKey}
             filter={filter}
             filterReset={filterReset}
             navHistory={navHistory}
             navigateBack={navigateBack}
+            pathHistory={pathHistory}
+            onClearPath={clearPath}
+            onPathClick={(entry) => {
+              if (!data?.nodes) return;
+              const n = data.nodes.find(x => x.id === entry.id);
+              if (n) { setSelected(n); }
+            }}
           />
 
           <GraphRightPanel
@@ -462,6 +499,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             onBuildSubgraph={buildSubgraph}
             subgraphFilter={subgraphFilter}
             onClearSubgraphFilter={() => setSubgraphFilter(null)}
+            annotations={annotations}
           />
         </div>
 

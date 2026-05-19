@@ -21,7 +21,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Network, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
+import {
+  Network, Loader2, ChevronDown, ChevronRight, X, Trash2
+} from 'lucide-react';
 import {
   COLORS, NODE_RADIUS, radiusFor, isPhaseBCounterparty,
   truncateLabel, fmtVolumeShort, fmtMoney, shouldShowHoverLabel,
@@ -59,11 +61,21 @@ export default function GraphCanvas({
   multiSelectedIds = null,
   // View toggles
   showEdgeLabels = false,
+  annotationsByKey = null,
   // Overlay state
   filter,
   filterReset,
   navHistory,
-  navigateBack
+  navigateBack,
+  // Investigation path (Part 13)
+  pathHistory = [],
+  onPathClick,
+  onClearPath,
+  // Diff overlay (Part 11)
+  compareActive = false,
+  compareWindow = null,
+  compareCounts = null,
+  onClearCompare
 }) {
   const [legendOpen, setLegendOpen] = useState(true);
   const [hintVisible, setHintVisible] = useState(true);
@@ -115,7 +127,7 @@ export default function GraphCanvas({
             backgroundColor="#F8FAFC"
             nodeRelSize={5}
             nodeCanvasObject={(node, ctx, globalScale) =>
-              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds)
+              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey)
             }
             nodePointerAreaPaint={(node, color, ctx) => {
               ctx.fillStyle = color;
@@ -215,10 +227,37 @@ export default function GraphCanvas({
         </div>
       )}
 
+      {/* Diff overlay banner (Part 11). Sits just below the toolbar
+          so the analyst always sees the diff scope. Stacks above the
+          multi-select banner if both happen to be active. */}
+      {compareActive && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-2 bg-violet-100 border border-violet-400 text-violet-900 text-[11px] font-semibold rounded-md px-3 py-1 shadow-sm">
+          <span>Diff vs {compareWindow?.from || '–'} → {compareWindow?.to || '–'}</span>
+          {compareCounts && (
+            <span className="text-violet-700 font-normal">
+              · <span className="text-emerald-700 font-semibold">+{compareCounts.addedNodes}</span>
+              / <span className="text-red-700 font-semibold">−{compareCounts.removedNodes}</span> nodes
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onClearCompare}
+            className="ml-1 text-violet-800 hover:text-violet-900 underline"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* Multi-select mode banner — pinned top-center so the analyst
-          always sees the mode is on (it changes click semantics). */}
+          always sees the mode is on (it changes click semantics).
+          Pushes down when the diff banner is also visible. */}
       {multiSelectMode && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-2 bg-amber-100 border border-amber-400 text-amber-900 text-[11px] font-semibold rounded-md px-3 py-1 shadow-sm">
+        <div
+          className={`absolute left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-2 bg-amber-100 border border-amber-400 text-amber-900 text-[11px] font-semibold rounded-md px-3 py-1 shadow-sm ${
+            compareActive ? 'top-12' : 'top-3'
+          }`}
+        >
           Select nodes to build subgraph ({multiSelectedIds?.size || 0} selected) · Press Esc to cancel
         </div>
       )}
@@ -233,6 +272,17 @@ export default function GraphCanvas({
         >
           ← Back
         </button>
+      )}
+
+      {/* Investigation path breadcrumb (Part 13). Pinned bottom-center
+          above any phase-indicator chip; collapses gracefully when only
+          one node has been visited. */}
+      {pathHistory && pathHistory.length > 0 && (
+        <GraphPathStrip
+          path={pathHistory}
+          onClick={onPathClick}
+          onClear={onClearPath}
+        />
       )}
 
       {/* Top-right active-filter chip. */}
@@ -260,6 +310,10 @@ export default function GraphCanvas({
 function linkColor(l, selected) {
   const dimmed = selected && !linkTouchesSelected(l, selected);
   if (dimmed) return 'rgba(148, 163, 184, 0.15)';
+  // Diff overlay (Part 11): added in window B → green, removed only
+  // in window A → red. Unchanged falls through to the regular palette.
+  if (l._diffStatus === 'added')   return '#10B981';
+  if (l._diffStatus === 'removed') return '#DC2626';
   if (l.type === 'TRANSACTS_WITH') return l.alerted ? '#DC2626' : '#94A3B8';
   if (l.type === 'CO_OCCURS_WITH') return '#CBD5E1';
   if (l.type === 'APPEARS_IN')     return '#3B82F6';
@@ -279,6 +333,9 @@ function linkWidth(l) {
 }
 
 function linkDash(l) {
+  // Diff overlay: removed-only edges read dashed so they don't compete
+  // visually with present edges in the same color family.
+  if (l._diffStatus === 'removed') return [4, 3];
   // computed = co-occurrence inference (Phase A backfill). Keep dashed
   // so analysts know it's derived. HOLDS_ACCOUNT also dashes so it
   // reads visually as structural rather than behavioural.
@@ -352,7 +409,7 @@ function linkTouchesSelected(link, selected) {
 }
 
 // ─── Custom node draw ───────────────────────────────────────────────────
-function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds) {
+function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey) {
   // Phase B counterparties take the high-risk orange fill when any risk
   // indicator fires; otherwise they keep the standard COMPANY hue.
   const phaseB = isPhaseBCounterparty(node);
@@ -373,6 +430,10 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     const isConnected  = adjacency.get(selected.id)?.has(node.id);
     alpha = (isSelected || isConnected) ? 1 : 0.1;
   }
+  // Diff overlay: removed nodes fade a little so adds/unchanged read
+  // brighter against them. Added nodes stay at full opacity to draw
+  // the eye to the new entity.
+  if (node._diffStatus === 'removed') alpha = Math.min(alpha, 0.55);
   ctx.save();
   ctx.globalAlpha = alpha;
 
@@ -460,6 +521,19 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.stroke();
   }
 
+  // Diff status ring (Part 11). Drawn outside the focus halo but
+  // inside the selection ring so single-select still overrides
+  // visually. 'added' = green, 'removed' = red dashed.
+  if (node._diffStatus === 'added' || node._diffStatus === 'removed') {
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI, false);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = node._diffStatus === 'added' ? '#10B981' : '#DC2626';
+    if (node._diffStatus === 'removed') ctx.setLineDash([3, 2]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   // Selection ring (blue, outermost)
   if (selected && selected.id === node.id) {
     ctx.beginPath();
@@ -478,6 +552,33 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.lineWidth = 2.5;
     ctx.strokeStyle = '#F59E0B';
     ctx.stroke();
+  }
+
+  // Annotation pin — small yellow square in the upper-left of any node
+  // that has at least one pinned note for the current alert. Drawn
+  // before the risk-score badge so they don't collide visually.
+  const annotations = annotationsByKey?.get?.(node.id);
+  if (annotations && annotations.length > 0 && globalScale >= 0.5) {
+    const pinR = Math.max(4, Math.min(6, r * 0.45));
+    const px = node.x - r + 1;
+    const py = node.y - r + 1;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, pinR, 0, 2 * Math.PI, false);
+    ctx.fillStyle = '#FACC15';   // amber-400
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.stroke();
+    if (annotations.length > 1 && globalScale >= 1.0) {
+      const f = Math.max(7, 8 / globalScale);
+      ctx.font = `bold ${f}px Inter, sans-serif`;
+      ctx.fillStyle = '#92400E';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(annotations.length), px, py);
+    }
+    ctx.restore();
   }
 
   // Risk-score badge — small circle in the upper-right of the node
@@ -549,6 +650,58 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
   }
 
   ctx.restore();
+}
+
+// Investigation path strip — chronological breadcrumb pinned to the
+// bottom of the canvas. Each crumb is a button: clicking it re-selects
+// the node (driving the right panel back to that entity's details).
+// The strip shows up to the last 6 crumbs by default to keep things
+// readable; a "+N" chip on the left signals there are older entries
+// not shown.
+function GraphPathStrip({ path, onClick, onClear }) {
+  const visible = path.slice(-6);
+  const hiddenCount = path.length - visible.length;
+  return (
+    <div
+      className="absolute bottom-12 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1 bg-white/95 border border-slate-200 rounded-full pl-1 pr-1 py-1 shadow-sm text-[11px]"
+      role="navigation"
+      aria-label="Investigation path"
+    >
+      {hiddenCount > 0 && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-medium"
+          title={`${hiddenCount} earlier node${hiddenCount === 1 ? '' : 's'} not shown`}
+        >
+          +{hiddenCount}
+        </span>
+      )}
+      {visible.map((entry, i) => (
+        <div key={`${entry.id}-${entry.ts}-${i}`} className="inline-flex items-center gap-1">
+          {i > 0 && <span className="text-slate-300">›</span>}
+          <button
+            type="button"
+            onClick={() => onClick && onClick(entry)}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full hover:bg-blue-50 text-navy-900"
+            title={entry.label}
+          >
+            <span
+              className="inline-block w-2 h-2 rounded-full shrink-0"
+              style={{ backgroundColor: COLORS[entry.type] || '#94A3B8' }}
+            />
+            <span className="max-w-[8rem] truncate">{entry.label}</span>
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={onClear}
+        title="Clear investigation path"
+        className="ml-0.5 inline-flex items-center justify-center h-5 w-5 rounded-full text-slate-400 hover:bg-red-50 hover:text-red-600"
+      >
+        <X size={11} />
+      </button>
+    </div>
+  );
 }
 
 function Centered({ children }) {

@@ -16,7 +16,9 @@
 // lives inside this hook so the parent doesn't have to wire it up.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+
+const PATH_CAP = 20;
 
 export function useGraphInteraction() {
   const [selected, setSelected] = useState(null);
@@ -24,6 +26,29 @@ export function useGraphInteraction() {
   const [hoveredLink, setHoveredLink] = useState(null);
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 });
   const [contextMenu, setContextMenu] = useState(null);
+  // Part 13 — Investigation path: chronological breadcrumb of visited
+  // nodes so the analyst can retrace their click trail.
+  const [pathHistory, setPathHistory] = useState([]);
+
+  const pushToPath = useCallback((node) => {
+    if (!node || !node.id) return;
+    setPathHistory(prev => {
+      // Drop a consecutive duplicate (re-clicking the same node shouldn't
+      // create a stutter in the trail). Otherwise append and cap.
+      if (prev.length > 0 && prev[prev.length - 1].id === node.id) return prev;
+      const entry = {
+        id: node.id,
+        type: node.type,
+        label: node.label || node.customer_name || node.alert_id || node.sar_id || node.id,
+        is_counterparty: !!node.is_counterparty,
+        ts: Date.now()
+      };
+      const next = [...prev, entry];
+      return next.length > PATH_CAP ? next.slice(next.length - PATH_CAP) : next;
+    });
+  }, []);
+
+  const clearPath = useCallback(() => setPathHistory([]), []);
 
   // Right-click on any node opens the filter context menu (Keep Only /
   // Exclude / Reset / Re-center / Open Profile). The native event is
@@ -59,6 +84,8 @@ export function useGraphInteraction() {
     hoveredLink, setHoveredLink,
     cursorPos, setCursorPos,
     contextMenu, setContextMenu,
-    onNodeContext
+    onNodeContext,
+    // Investigation path (Part 13)
+    pathHistory, pushToPath, clearPath
   };
 }
