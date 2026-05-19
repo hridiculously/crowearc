@@ -16,7 +16,8 @@
 
 import { useMemo } from 'react';
 import {
-  Network, Flame, ExternalLink, Building2, FileText, ShieldAlert, Users
+  Network, Flame, ExternalLink, Building2, FileText, ShieldAlert, Users,
+  MousePointer2, X, GitMerge
 } from 'lucide-react';
 import EntityAlertTimeline from './EntityAlertTimeline.jsx';
 import {
@@ -89,7 +90,15 @@ function deriveNetworkRecent(data) {
 // ─── Main panel ─────────────────────────────────────────────────────────
 export default function GraphRightPanel({
   node, data, counts, customerName, customerId, userRole, userName,
-  rolePrefix, adjacency, onSelectNode, onRecenter
+  rolePrefix, adjacency, onSelectNode, onRecenter,
+  // Multi-select (Part 4)
+  multiSelectMode = false,
+  multiSelectNodes = null,
+  onToggleMultiSelectNode,
+  onClearMultiSelect,
+  onBuildSubgraph,
+  subgraphFilter = null,
+  onClearSubgraphFilter
 }) {
   const { alerts: timelineAlerts, sars: timelineSars } = useMemo(
     () => deriveTimeline(data, node),
@@ -103,12 +112,42 @@ export default function GraphRightPanel({
       : 'customer';
   const selectedEntityLabel = node?.label || node?.customer_name || node?.alert_id || node?.sar_id || '';
 
+  // The multi-select view takes priority over single-node detail when the
+  // analyst is actively building a subgraph (either in mode, or has 2+
+  // staged nodes from a prior session).
+  const showMultiSelectView = multiSelectMode || (multiSelectNodes && multiSelectNodes.size >= 1);
+
   return (
     <aside
       className="border-l border-slate-200 overflow-y-auto text-slate-700 bg-white"
       style={{ flex: '0 0 30%', maxWidth: '30%' }}
     >
-      {!node ? (
+      {/* Subgraph-active banner sits above everything else; clearing it
+          drops the dim filter so the full network returns. */}
+      {subgraphFilter && (
+        <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-[11px] text-amber-900 flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 font-semibold">
+            <GitMerge size={12} /> Subgraph view ({subgraphFilter.size} nodes)
+          </span>
+          <button
+            type="button"
+            onClick={onClearSubgraphFilter}
+            className="text-amber-800 hover:text-amber-900 underline font-medium"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
+      {showMultiSelectView ? (
+        <MultiSelectView
+          data={data}
+          multiSelectNodes={multiSelectNodes}
+          onToggleMultiSelectNode={onToggleMultiSelectNode}
+          onClearMultiSelect={onClearMultiSelect}
+          onBuildSubgraph={onBuildSubgraph}
+        />
+      ) : !node ? (
         <>
           <WelcomeState counts={counts} customerName={customerName} data={data} onSelectNode={onSelectNode} />
           {(networkRecent.alerts.length > 0 || networkRecent.sars.length > 0) && (
@@ -156,6 +195,166 @@ export default function GraphRightPanel({
         </>
       )}
     </aside>
+  );
+}
+
+// ─── Multi-select view ─────────────────────────────────────────────────
+// Shown in place of the WelcomeState / detail panels while the analyst is
+// in multi-select mode or has staged ≥1 nodes for a subgraph build. Lists
+// every staged node as a chip (click X to remove). When 2+ are staged,
+// computes the intersection of their first-order neighbour sets so the
+// analyst can see at a glance what their selection shares.
+function MultiSelectView({ data, multiSelectNodes, onToggleMultiSelectNode, onClearMultiSelect, onBuildSubgraph }) {
+  const count = multiSelectNodes?.size || 0;
+
+  const nodeById = useMemo(() => {
+    const m = new Map();
+    for (const n of data?.nodes || []) m.set(n.id, n);
+    return m;
+  }, [data]);
+
+  // Map: node-id -> Set of neighbour ids (over raw graph, not the filtered
+  // displayData — selection survives filter narrowing).
+  const adjacencyRaw = useMemo(() => {
+    const map = new Map();
+    for (const l of data?.links || []) {
+      const s = typeof l.source === 'object' ? l.source.id : l.source;
+      const t = typeof l.target === 'object' ? l.target.id : l.target;
+      if (!map.has(s)) map.set(s, new Set());
+      if (!map.has(t)) map.set(t, new Set());
+      map.get(s).add(t);
+      map.get(t).add(s);
+    }
+    return map;
+  }, [data]);
+
+  // Shared connections = intersection of the neighbour sets of every
+  // staged node, with the staged nodes themselves removed (you don't
+  // want a node to "share" itself).
+  const sharedConnections = useMemo(() => {
+    if (!multiSelectNodes || multiSelectNodes.size < 2) return [];
+    const ids = Array.from(multiSelectNodes);
+    let acc = adjacencyRaw.get(ids[0]) ? new Set(adjacencyRaw.get(ids[0])) : new Set();
+    for (let i = 1; i < ids.length; i++) {
+      const next = adjacencyRaw.get(ids[i]) || new Set();
+      acc = new Set([...acc].filter(x => next.has(x)));
+      if (acc.size === 0) break;
+    }
+    for (const id of ids) acc.delete(id);
+    return Array.from(acc).map(id => nodeById.get(id)).filter(Boolean);
+  }, [multiSelectNodes, adjacencyRaw, nodeById]);
+
+  const stagedNodes = useMemo(() => {
+    if (!multiSelectNodes) return [];
+    return Array.from(multiSelectNodes).map(id => nodeById.get(id)).filter(Boolean);
+  }, [multiSelectNodes, nodeById]);
+
+  return (
+    <div className="p-5 space-y-5">
+      <div className="flex items-center gap-2">
+        <div className="w-9 h-9 rounded-full inline-flex items-center justify-center bg-amber-100 border border-amber-300 shrink-0">
+          <MousePointer2 size={16} className="text-amber-700" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-sm font-bold text-navy-900">Multi-select</div>
+          <div className="text-[11px] text-slate-500">
+            {count === 0
+              ? 'Click nodes on the canvas to stage them.'
+              : `${count} node${count === 1 ? '' : 's'} staged`}
+          </div>
+        </div>
+      </div>
+
+      {count > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-2 flex items-center justify-between">
+            <span>Selected</span>
+            <button
+              type="button"
+              onClick={onClearMultiSelect}
+              className="text-[10px] text-slate-500 hover:text-slate-800 underline normal-case tracking-normal"
+            >
+              Clear all
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {stagedNodes.map(n => (
+              <span
+                key={n.id}
+                className="inline-flex items-center gap-1 bg-amber-50 border border-amber-300 text-amber-900 rounded-full pl-2 pr-1 py-0.5 text-[11px] max-w-full"
+                title={n.label || n.id}
+              >
+                <span
+                  className="inline-block w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: COLORS[n.type] || '#94A3B8' }}
+                />
+                <span className="truncate max-w-[10rem]">{n.label || n.id}</span>
+                <button
+                  type="button"
+                  onClick={() => onToggleMultiSelectNode && onToggleMultiSelectNode(n.id)}
+                  className="inline-flex items-center justify-center h-4 w-4 rounded-full hover:bg-amber-200 text-amber-700"
+                  aria-label={`Remove ${n.label || n.id}`}
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {count >= 2 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-2">
+            Shared connections ({sharedConnections.length})
+          </div>
+          {sharedConnections.length === 0 ? (
+            <div className="text-[11px] text-slate-500 italic">
+              These nodes have no first-order neighbours in common.
+            </div>
+          ) : (
+            <div className="space-y-1.5 max-h-48 overflow-y-auto">
+              {sharedConnections.slice(0, 25).map(n => (
+                <div
+                  key={n.id}
+                  className="flex items-center gap-2 text-xs border border-slate-200 bg-slate-50 rounded px-2 py-1.5"
+                  title={n.id}
+                >
+                  <span
+                    className="inline-block w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: COLORS[n.type] || '#94A3B8' }}
+                  />
+                  <div className="min-w-0 flex-1 truncate text-navy-900">{n.label || n.id}</div>
+                  {n.is_counterparty && <Chip tone="amber">Counterparty</Chip>}
+                </div>
+              ))}
+              {sharedConnections.length > 25 && (
+                <div className="text-[10px] text-slate-500 italic">
+                  +{sharedConnections.length - 25} more
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={onBuildSubgraph}
+        disabled={count < 2}
+        className={`w-full inline-flex items-center justify-center gap-1.5 text-sm font-semibold rounded px-3 py-2 ${
+          count < 2
+            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+            : 'bg-teal-600 hover:bg-teal-500 text-white'
+        }`}
+        title={count < 2 ? 'Stage at least 2 nodes' : 'Dim everything outside this subgraph'}
+      >
+        <GitMerge size={14} /> Build Subgraph
+      </button>
+      <div className="text-[10px] text-slate-500 text-center -mt-2">
+        Esc to cancel · clicks toggle membership
+      </div>
+    </div>
   );
 }
 

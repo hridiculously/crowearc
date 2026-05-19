@@ -49,10 +49,13 @@ export default function GraphCanvas({
   // Interaction handlers
   onMouseMove,
   onMouseLeave,
-  setSelected,
+  onNodeClick,
   setHoveredNode,
   setHoveredLink,
   onNodeContext,
+  // Multi-select
+  multiSelectMode = false,
+  multiSelectedIds = null,
   // Overlay state
   filter,
   filterReset,
@@ -109,7 +112,7 @@ export default function GraphCanvas({
             backgroundColor="#F8FAFC"
             nodeRelSize={5}
             nodeCanvasObject={(node, ctx, globalScale) =>
-              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency)
+              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds)
             }
             nodePointerAreaPaint={(node, color, ctx) => {
               ctx.fillStyle = color;
@@ -137,9 +140,9 @@ export default function GraphCanvas({
             linkDirectionalParticleSpeed={(l) => l.alerted ? 0.012 : 0.006}
             linkDirectionalParticleWidth={(l) => l.alerted ? 3 : 2}
             linkDirectionalParticleColor={(l) => l.alerted ? '#DC2626' : '#475569'}
-            onNodeClick={(node) => setSelected(node)}
+            onNodeClick={(node) => onNodeClick && onNodeClick(node)}
             onNodeHover={(node) => setHoveredNode(node || null)}
-            onBackgroundClick={() => setSelected(null)}
+            onBackgroundClick={() => onNodeClick && onNodeClick(null)}
             onLinkHover={(link) => setHoveredLink(link || null)}
             onNodeDragEnd={(node) => { node.fx = node.x; node.fy = node.y; }}
             onNodeRightClick={onNodeContext}
@@ -201,6 +204,14 @@ export default function GraphCanvas({
         </div>
       )}
 
+      {/* Multi-select mode banner — pinned top-center so the analyst
+          always sees the mode is on (it changes click semantics). */}
+      {multiSelectMode && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-2 bg-amber-100 border border-amber-400 text-amber-900 text-[11px] font-semibold rounded-md px-3 py-1 shadow-sm">
+          Select nodes to build subgraph ({multiSelectedIds?.size || 0} selected) · Press Esc to cancel
+        </div>
+      )}
+
       {/* Top-left back chip. */}
       {navHistory.length > 0 && (
         <button
@@ -259,7 +270,7 @@ function linkTouchesSelected(link, selected) {
 }
 
 // ─── Custom node draw ───────────────────────────────────────────────────
-function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency) {
+function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds) {
   // Phase B counterparties take the high-risk orange fill when any risk
   // indicator fires; otherwise they keep the standard COMPANY hue.
   const phaseB = isPhaseBCounterparty(node);
@@ -268,9 +279,14 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency) {
   const r = radiusFor(node);
 
   // Selection dimming — when a node is clicked, non-neighbour nodes fade
-  // heavily so the first-order neighbourhood pops.
+  // heavily so the first-order neighbourhood pops. The simulation hook
+  // also stamps node._dimmed when the analyst has built a subgraph
+  // filter from multi-select; that takes precedence over single-select
+  // dimming so the chosen subgraph stays at full opacity.
   let alpha = 1;
-  if (selected) {
+  if (node._dimmed) {
+    alpha = 0.08;
+  } else if (selected) {
     const isSelected   = selected.id === node.id;
     const isConnected  = adjacency.get(selected.id)?.has(node.id);
     alpha = (isSelected || isConnected) ? 1 : 0.1;
@@ -346,6 +362,17 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency) {
     ctx.arc(node.x, node.y, r + 7, 0, 2 * Math.PI, false);
     ctx.lineWidth = 2;
     ctx.strokeStyle = '#3B82F6';
+    ctx.stroke();
+  }
+
+  // Multi-select ring (amber). Shown when this node is one of the
+  // analyst's multi-selected set — separate visual from the single-
+  // node blue selection ring above.
+  if (multiSelectedIds && multiSelectedIds.has && multiSelectedIds.has(node.id)) {
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, r + 5, 0, 2 * Math.PI, false);
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#F59E0B';
     ctx.stroke();
   }
 

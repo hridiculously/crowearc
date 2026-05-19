@@ -1,27 +1,65 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// useGraphFilters — owns the Tableau-style filter state for the graph.
+// useGraphFilters — owns every filter / view-toggle dimension for the
+// CCEG graph modal.
 //
-// Today this is just the keep-only / exclude / reset modes wired to the
-// right-click context menu. Subsequent sprints layer additional filter
-// dimensions on top (edge filters, time window, multi-select, etc.); when
-// they ship they go inside this hook so the simulation hook has a single
-// authoritative source of which-nodes-are-hidden.
+// State buckets:
+//
+//   filter          — Tableau-style keep-only / exclude (existing).
+//   edgeFilters     — checkboxes that hide / show specific edge categories
+//                     (direction, alert status, type, volume thresholds).
+//   multiSelectMode — toolbar toggle. When true, single click adds to /
+//                     removes from multiSelectNodes instead of replacing
+//                     `selected`.
+//   multiSelectNodes — Set of node IDs currently in the multi-select bag.
+//   subgraphFilter  — set after the analyst confirms "Build Subgraph"
+//                     from a multi-select. Drives an extra opacity gate
+//                     in displayData.
+//   showEdgeLabels  — toolbar toggle; consumed by GraphCanvas in a later
+//                     PR (Part 6).
+//   showAccountNodes — toolbar toggle; triggers a re-fetch with
+//                     ?includeAccounts=true (Part 1b of the backend PR).
+//   showClusters    — toolbar toggle; consumed by Part 16 cluster overlay.
+//   viewMode        — 'force' (default) | 'sankey' (Part 17).
+//
+// Setters and small action helpers are returned alongside the raw values.
+// Hooks consume only what they need.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
+
+const DEFAULT_EDGE_FILTERS = Object.freeze({
+  showAll: true,
+  inbound: true,
+  outbound: true,
+  bidirectional: true,
+  alerted: true,
+  nonAlerted: true,
+  transactsWith: true,
+  coOccursWith: true,
+  holdsAccount: true,      // only meaningful when account nodes are on
+  minTxnCount: 0,
+  minVolume: 0
+});
 
 export function useGraphFilters() {
-  // mode='all'      — full graph (default).
-  // mode='keepOnly' — show only the first-order neighbourhood of one node.
-  // mode='exclude'  — hide the listed nodes (and edges touching them).
-  // Excluded ids accumulate; Reset returns to 'all'.
   const [filter, setFilter] = useState({ mode: 'all', ids: [] });
+  const [edgeFilters, setEdgeFilters] = useState(DEFAULT_EDGE_FILTERS);
 
-  const filterKeepOnly = (nodeId) => {
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [multiSelectNodes, setMultiSelectNodes] = useState(() => new Set());
+  const [subgraphFilter, setSubgraphFilter] = useState(null);
+
+  const [showEdgeLabels, setShowEdgeLabels] = useState(false);
+  const [showAccountNodes, setShowAccountNodes] = useState(false);
+  const [showClusters, setShowClusters] = useState(false);
+  const [viewMode, setViewMode] = useState('force');
+
+  // ── Filter actions (Tableau-style) ───────────────────────────────
+  const filterKeepOnly = useCallback((nodeId) => {
     setFilter({ mode: 'keepOnly', ids: [nodeId] });
-  };
+  }, []);
 
-  const filterExclude = (nodeId) => {
+  const filterExclude = useCallback((nodeId) => {
     setFilter(prev => {
       if (prev.mode === 'exclude') {
         const ids = Array.from(new Set([...prev.ids, nodeId]));
@@ -29,17 +67,75 @@ export function useGraphFilters() {
       }
       return { mode: 'exclude', ids: [nodeId] };
     });
-  };
+  }, []);
 
-  const filterReset = () => {
+  const filterReset = useCallback(() => {
     setFilter({ mode: 'all', ids: [] });
-  };
+  }, []);
+
+  // ── Edge filter helpers ──────────────────────────────────────────
+  const resetEdgeFilters = useCallback(() => {
+    setEdgeFilters(DEFAULT_EDGE_FILTERS);
+  }, []);
+
+  const updateEdgeFilter = useCallback((key, value) => {
+    setEdgeFilters(prev => ({ ...prev, [key]: value }));
+  }, []);
+
+  // Active filter count for the toolbar badge dot. Counts every box
+  // that diverges from the default-all-on state.
+  const activeEdgeFilterCount =
+    (!edgeFilters.showAll ? 1 : 0) +
+    (!edgeFilters.inbound ? 1 : 0) +
+    (!edgeFilters.outbound ? 1 : 0) +
+    (!edgeFilters.bidirectional ? 1 : 0) +
+    (!edgeFilters.alerted ? 1 : 0) +
+    (!edgeFilters.nonAlerted ? 1 : 0) +
+    (!edgeFilters.transactsWith ? 1 : 0) +
+    (!edgeFilters.coOccursWith ? 1 : 0) +
+    (!edgeFilters.holdsAccount ? 1 : 0) +
+    (edgeFilters.minTxnCount > 0 ? 1 : 0) +
+    (edgeFilters.minVolume > 0 ? 1 : 0);
+
+  // ── Multi-select actions ─────────────────────────────────────────
+  const toggleMultiSelectNode = useCallback((nodeId) => {
+    setMultiSelectNodes(prev => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
+
+  const clearMultiSelect = useCallback(() => {
+    setMultiSelectNodes(new Set());
+    setSubgraphFilter(null);
+  }, []);
+
+  const exitMultiSelectMode = useCallback(() => {
+    setMultiSelectMode(false);
+    setMultiSelectNodes(new Set());
+    setSubgraphFilter(null);
+  }, []);
 
   return {
-    filter,
-    setFilter,
-    filterKeepOnly,
-    filterExclude,
-    filterReset
+    // Tableau filter
+    filter, setFilter,
+    filterKeepOnly, filterExclude, filterReset,
+    // Edge filters
+    edgeFilters,
+    updateEdgeFilter,
+    resetEdgeFilters,
+    activeEdgeFilterCount,
+    // Multi-select
+    multiSelectMode, setMultiSelectMode,
+    multiSelectNodes, toggleMultiSelectNode, clearMultiSelect,
+    subgraphFilter, setSubgraphFilter,
+    exitMultiSelectMode,
+    // Toolbar toggles
+    showEdgeLabels, setShowEdgeLabels,
+    showAccountNodes, setShowAccountNodes,
+    showClusters, setShowClusters,
+    viewMode, setViewMode
   };
 }

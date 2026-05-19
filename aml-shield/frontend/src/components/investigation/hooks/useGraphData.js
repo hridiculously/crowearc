@@ -15,7 +15,19 @@
 import { useEffect, useState } from 'react';
 import api from '../../../api/client.js';
 
-export function useGraphData(customerId) {
+// Build the query string for /api/customers/:id/graph from the optional
+// fetch params (time window + account-node toggle). Returns an empty
+// string when none are set so the unwindowed call goes to the bare
+// endpoint.
+function buildGraphQuery({ from, to, includeAccounts } = {}) {
+  const parts = [];
+  if (from) parts.push(`from=${encodeURIComponent(from)}`);
+  if (to)   parts.push(`to=${encodeURIComponent(to)}`);
+  if (includeAccounts) parts.push('includeAccounts=true');
+  return parts.length > 0 ? `?${parts.join('&')}` : '';
+}
+
+export function useGraphData(customerId, fetchParams = {}) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [currentCustomerId, setCurrentCustomerId] = useState(customerId);
@@ -27,19 +39,28 @@ export function useGraphData(customerId) {
     setNavHistory([]);
   }, [customerId]);
 
-  // Fetch keyed off currentCustomerId so the in-modal pivot triggers a
-  // fresh fetch.
+  // Fetch keyed off currentCustomerId + the fetch params. Includes a
+  // stable string key for the params so the effect re-fires when any
+  // dimension changes (account toggle, time window).
+  const paramsKey = JSON.stringify({
+    from: fetchParams.from || null,
+    to: fetchParams.to || null,
+    includeAccounts: !!fetchParams.includeAccounts
+  });
   useEffect(() => {
     let cancelled = false;
     setData(null);
     setError(null);
-    api.get(`/customers/${currentCustomerId}/graph`)
+    const qs = buildGraphQuery(fetchParams);
+    api.get(`/customers/${currentCustomerId}/graph${qs}`)
       .then(r => { if (!cancelled) setData(r.data); })
       .catch(err => {
         if (!cancelled) setError(err.response?.data?.error || err.message || 'Failed to load graph');
       });
     return () => { cancelled = true; };
-  }, [currentCustomerId]);
+    // paramsKey covers the fetchParams object identity safely.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentCustomerId, paramsKey]);
 
   // Push the current focus, swap to the new one.
   const recenterOn = (newCustomerId) => {

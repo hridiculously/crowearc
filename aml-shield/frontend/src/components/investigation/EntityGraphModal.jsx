@@ -9,12 +9,14 @@
 //
 //   * read the analyst's role + name from localStorage
 //   * mount the hooks
-//   * compose the left + right panes
+//   * compose the toolbar + left + right panes
 //   * render the modal chrome (header with zoom buttons + close)
+//   * own the click router (single-click vs multi-select-add)
 //   * render the top-level context menu overlay (it sits above both panes
 //     and is positioned page-absolute, so it lives at the modal root)
 //   * track the canvas container size for the force graph
-//   * handle Escape-to-close and body-scroll lock
+//   * handle Escape-to-close (or Escape-to-exit-multi-select) and
+//     body-scroll lock
 //
 // Anything that touches graph data, filter state, or drawing belongs in a
 // hook or in GraphCanvas / GraphRightPanel — not here.
@@ -24,6 +26,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ZoomIn, ZoomOut, Maximize2, Network } from 'lucide-react';
 import GraphCanvas from './GraphCanvas.jsx';
 import GraphRightPanel from './GraphRightPanel.jsx';
+import GraphToolbar from './GraphToolbar.jsx';
+import GraphEdgeFilterPanel from './GraphEdgeFilterPanel.jsx';
 import { useGraphData } from './hooks/useGraphData.js';
 import { useGraphFilters } from './hooks/useGraphFilters.js';
 import { useGraphSimulation } from './hooks/useGraphSimulation.js';
@@ -31,16 +35,39 @@ import { useGraphInteraction } from './hooks/useGraphInteraction.js';
 import { readUser, rolePrefixFor } from './graphHelpers.js';
 
 export default function EntityGraphModal({ customerId, customerName, onClose }) {
+  // ── Toolbar/view state ──────────────────────────────────────────────
+  // Toolbar toggles (account nodes + time window) drive the fetch params.
+  // showAccountNodes triggers a re-fetch via the hook's paramsKey.
+  const filters = useGraphFilters();
+  const {
+    filter, filterKeepOnly, filterExclude, filterReset,
+    edgeFilters, updateEdgeFilter, resetEdgeFilters, activeEdgeFilterCount,
+    multiSelectMode, setMultiSelectMode,
+    multiSelectNodes, toggleMultiSelectNode, clearMultiSelect, exitMultiSelectMode,
+    subgraphFilter, setSubgraphFilter,
+    showEdgeLabels, setShowEdgeLabels,
+    showAccountNodes, setShowAccountNodes,
+    showClusters, setShowClusters,
+    viewMode, setViewMode
+  } = filters;
+
+  const [timeWindow, setTimeWindow] = useState(null);   // { from, to } or null
+  const [edgeFilterOpen, setEdgeFilterOpen] = useState(false);
+
+  const fetchParams = useMemo(() => ({
+    from: timeWindow?.from || null,
+    to:   timeWindow?.to   || null,
+    includeAccounts: !!showAccountNodes
+  }), [timeWindow, showAccountNodes]);
+
   // ── Hooks ───────────────────────────────────────────────────────────
   const {
     data, error, currentCustomerId, navHistory, recenterOn, navigateBack
-  } = useGraphData(customerId);
+  } = useGraphData(customerId, fetchParams);
 
-  const {
-    filter, filterKeepOnly, filterExclude, filterReset
-  } = useGraphFilters();
-
-  const { displayData, adjacency, networkCounts } = useGraphSimulation(data, filter);
+  const { displayData, adjacency, networkCounts } = useGraphSimulation(
+    data, filter, { edgeFilters, subgraphFilter }
+  );
 
   const {
     selected, setSelected,
@@ -60,6 +87,12 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
   const userRole = user?.role || null;
   const userName = user?.name || null;
   const rolePrefix = useMemo(() => rolePrefixFor(userRole), [userRole]);
+
+  // ── Counterparty count drives the Flow View disable threshold ──────
+  const counterpartyCount = useMemo(() => {
+    if (!data?.nodes) return 0;
+    return data.nodes.filter(n => n.is_counterparty).length;
+  }, [data]);
 
   // ── Clear selection on re-center (selection from prior graph isn't valid) ─
   useEffect(() => { setSelected(null); }, [currentCustomerId, setSelected]);
@@ -96,12 +129,21 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
     return () => clearTimeout(t);
   }, [data]);
 
-  // ── Escape closes modal; body-scroll lock ───────────────────────────
+  // ── Escape: in multi-select mode, exit it. Otherwise close modal. ──
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose && onClose(); };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      if (multiSelectMode) {
+        exitMultiSelectMode();
+      } else if (edgeFilterOpen) {
+        setEdgeFilterOpen(false);
+      } else {
+        onClose && onClose();
+      }
+    };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [multiSelectMode, edgeFilterOpen, exitMultiSelectMode, onClose]);
 
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -121,6 +163,53 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
     if (node.is_counterparty) return;
     const url = `${rolePrefix}/customers/${encodeURIComponent(node.customer_id)}`;
     try { window.open(url, '_blank', 'noopener'); } catch (_) { /* ignore */ }
+  };
+
+  // ── Node-click router. In multi-select mode, clicks toggle the
+  //    node's membership in the multi-select set instead of replacing
+  //    `selected`. Background click in multi-select mode is a no-op.
+  const handleNodeClick = (node) => {
+    if (multiSelectMode) {
+      if (!node) return;
+      toggleMultiSelectNode(node.id);
+      return;
+    }
+    setSelected(node || null);
+  };
+
+  // ── Toolbar action router ──────────────────────────────────────────
+  const handleToolbarAction = (name) => {
+    switch (name) {
+      case 'toggleEdgeLabels':   setShowEdgeLabels(v => !v); break;
+      case 'toggleAccountNodes': setShowAccountNodes(v => !v); break;
+      case 'toggleClusters':     setShowClusters(v => !v); break;
+      case 'toggleFlowView':     setViewMode(viewMode === 'sankey' ? 'force' : 'sankey'); break;
+      case 'openEdgeFilter':     setEdgeFilterOpen(o => !o); break;
+      case 'openTimeWindow':     /* deferred to a follow-up PR */ break;
+      case 'toggleMultiSelect':
+        if (multiSelectMode) exitMultiSelectMode();
+        else { setSelected(null); setMultiSelectMode(true); }
+        break;
+      case 'captureEvidence':    /* deferred — PR 5 */ break;
+      case 'exportPng':          /* deferred — PR 5 */ break;
+      case 'saveView':           /* deferred — PR 5 */ break;
+      default: break;
+    }
+  };
+
+  // ── "Build Subgraph" — keep multi-selected nodes + everything one
+  //    hop away. Used by the right-panel multi-select view.
+  const buildSubgraph = () => {
+    if (multiSelectNodes.size < 2) return;
+    const keep = new Set(multiSelectNodes);
+    for (const l of data?.links || []) {
+      const s = typeof l.source === 'object' ? l.source.id : l.source;
+      const t = typeof l.target === 'object' ? l.target.id : l.target;
+      if (multiSelectNodes.has(s)) keep.add(t);
+      if (multiSelectNodes.has(t)) keep.add(s);
+    }
+    setSubgraphFilter(keep);
+    setMultiSelectMode(false);
   };
 
   // ── Derived render state ────────────────────────────────────────────
@@ -164,8 +253,30 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
           </div>
         </div>
 
+        {/* Toolbar */}
+        <GraphToolbar
+          state={{
+            showEdgeLabels, showAccountNodes, showClusters,
+            viewMode, multiSelectMode
+          }}
+          counterpartyCount={counterpartyCount}
+          activeEdgeFilterCount={activeEdgeFilterCount}
+          timeWindow={timeWindow}
+          onAction={handleToolbarAction}
+        />
+
         {/* Body: graph (70%) + details (30%) */}
-        <div className="flex-1 flex min-h-0">
+        <div className="flex-1 flex min-h-0 relative">
+          {/* Edge filter popover lives at body-relative position so it
+              floats above the canvas at the top-left corner. */}
+          <GraphEdgeFilterPanel
+            open={edgeFilterOpen}
+            edgeFilters={edgeFilters}
+            onChange={updateEdgeFilter}
+            onReset={resetEdgeFilters}
+            onClose={() => setEdgeFilterOpen(false)}
+          />
+
           <GraphCanvas
             data={data}
             displayData={displayData}
@@ -181,10 +292,12 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
             cursorPos={cursorPos}
             onMouseMove={onMouseMove}
             onMouseLeave={onMouseLeave}
-            setSelected={setSelected}
+            onNodeClick={handleNodeClick}
             setHoveredNode={setHoveredNode}
             setHoveredLink={setHoveredLink}
             onNodeContext={onNodeContext}
+            multiSelectMode={multiSelectMode}
+            multiSelectedIds={multiSelectNodes}
             filter={filter}
             filterReset={filterReset}
             navHistory={navHistory}
@@ -203,6 +316,13 @@ export default function EntityGraphModal({ customerId, customerName, onClose }) 
             adjacency={adjacency}
             onSelectNode={setSelected}
             onRecenter={recenterOn}
+            multiSelectMode={multiSelectMode}
+            multiSelectNodes={multiSelectNodes}
+            onToggleMultiSelectNode={toggleMultiSelectNode}
+            onClearMultiSelect={clearMultiSelect}
+            onBuildSubgraph={buildSubgraph}
+            subgraphFilter={subgraphFilter}
+            onClearSubgraphFilter={() => setSubgraphFilter(null)}
           />
         </div>
 
