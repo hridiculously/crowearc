@@ -38,7 +38,12 @@ import { useGraphInteraction } from './hooks/useGraphInteraction.js';
 import { useGraphAnnotations, edgeKey } from './hooks/useGraphAnnotations.js';
 import { useCompareGraphData } from './hooks/useCompareGraphData.js';
 import { computeGraphDiff } from './graphDiff.js';
-import { computeClusters } from './graphClusters.js';
+import { forceCollide } from 'd3-force-3d';
+import { radiusFor } from './graphHelpers.js';
+// (computeClusters import retired — the cluster halo toggle was
+// removed because the BFS-component algorithm painted ~all nodes in
+// dense hub-and-spoke networks. The helper file remains on disk for
+// a future smarter implementation.)
 import { readUser, rolePrefixFor } from './graphHelpers.js';
 import { captureCanvasPng, downloadPng, blobToFile } from './graphExport.js';
 import api from '../../api/client.js';
@@ -149,14 +154,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     return data.nodes.filter(n => n.is_counterparty).length;
   }, [data]);
 
-  // ── Cluster overlay (Part 16). Computed only when the toggle is on
-  //    so cold-path renders skip the BFS scan. The simulation gives
-  //    us filtered displayData; clustering runs on that so subgraph /
-  //    edge-filter narrowing changes the components in real time.
-  const clusters = useMemo(
-    () => showClusters ? computeClusters(displayData) : null,
-    [showClusters, displayData]
-  );
+  // (Cluster overlay retired — see EntityGraphModal import note.)
 
   // ── Saved-view indicator (refreshes on rev bump + customer change). ─
   const hasSavedView = useMemo(
@@ -180,22 +178,46 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     return () => ro.disconnect();
   }, []);
 
-  // ── d3-force tuning + auto-fit once the simulation has settled ──────
+  // ── d3-force tuning. Tuned for dense hub-and-spoke networks
+  //    (crypto exchanges, MSBs) where a focus customer pulls 15+
+  //    counterparties on one orbit. With the previous defaults
+  //    (charge -320, link distance 140) those graphs opened as
+  //    a single overlapping cluster the analyst had to manually
+  //    drag apart. The current values:
+  //      * charge -900 with distanceMax=900 — strong long-range
+  //        repulsion that breaks the orbit cluster
+  //      * link distance 220 / strength 0.35 — wider spokes
+  //      * forceCollide(radiusFor + 18) — hard no-overlap
+  //        constraint so node bodies never visually pile up
+  //    Auto-fit fires from onEngineStop (below) rather than a
+  //    fixed timeout so the camera frames the settled layout.
   useEffect(() => {
     if (!fgRef.current || !data) return;
     try {
       const chargeForce = fgRef.current.d3Force('charge');
-      if (chargeForce) chargeForce.strength(-320);
+      if (chargeForce) chargeForce.strength(-900).distanceMax(900);
       const linkForce = fgRef.current.d3Force('link');
-      if (linkForce) linkForce.distance(140);
+      if (linkForce) linkForce.distance(220).strength(0.35);
+      fgRef.current.d3Force(
+        'collide',
+        forceCollide(n => radiusFor(n) + 18).strength(0.9).iterations(2)
+      );
+      // Re-heat the simulation so the new forces actually apply
+      // when this effect re-runs on a fresh customer / re-fetch.
+      if (typeof fgRef.current.d3ReheatSimulation === 'function') {
+        fgRef.current.d3ReheatSimulation();
+      }
     } catch (_) { /* older lib versions may not expose d3Force */ }
   }, [data]);
 
+  // Auto-fit safety net — if onEngineStop doesn't fire (some lib
+  // builds skip it on tiny graphs), this falls back at 2.5s. The
+  // primary fit happens from the ForceGraph2D onEngineStop callback.
   useEffect(() => {
     if (!fgRef.current || !data) return;
     const t = setTimeout(() => {
-      try { fgRef.current.zoomToFit(400, 150); } catch (_) { /* ignore */ }
-    }, 1500);
+      try { fgRef.current.zoomToFit(400, 120); } catch (_) { /* ignore */ }
+    }, 2500);
     return () => clearTimeout(t);
   }, [data]);
 
@@ -357,7 +379,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     switch (name) {
       case 'toggleEdgeLabels':   setShowEdgeLabels(v => !v); break;
       case 'toggleAccountNodes': setShowAccountNodes(v => !v); break;
-      case 'toggleClusters':     setShowClusters(v => !v); break;
+      // case 'toggleClusters': retired — see import-block note.
       case 'toggleFlowView':     setViewMode(viewMode === 'sankey' ? 'force' : 'sankey'); break;
       case 'openEdgeFilter':     openOne(edgeFilterOpen  ? null : 'edgeFilter');  break;
       case 'openTimeWindow':     openOne(timeWindowOpen  ? null : 'timeWindow');  break;
@@ -441,7 +463,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
         {/* Toolbar */}
         <GraphToolbar
           state={{
-            showEdgeLabels, showAccountNodes, showClusters,
+            showEdgeLabels, showAccountNodes,
             viewMode, multiSelectMode, hasSavedView
           }}
           counterpartyCount={counterpartyCount}
@@ -509,8 +531,6 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
             showEdgeLabels={showEdgeLabels}
             hubRingThreshold={hubRingThreshold}
             annotationsByKey={annotations.byTargetKey}
-            clusterByNodeId={clusters?.clusterByNodeId || null}
-            colorByClusterId={clusters?.colorByClusterId || null}
             filter={filter}
             filterReset={filterReset}
             navHistory={navHistory}

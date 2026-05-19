@@ -43,21 +43,18 @@
 //    globalScale ≥ 0.4.
 //
 // 3) RING-DRAW SEQUENCE (top of drawNode → bottom; later = visually outer):
-//    a. cluster halo  (Part 16 overlay, when showClusters)
-//    b. body fill     (circle / diamond / rounded-square)
-//    c. hub ring      (violet, r+4) — fires on PhaseB CP w/ shared ≥ threshold
-//    d. sanctions ring (red,    r+1) — fires on risk_indicators.sanctions_hit
-//    e. focus halo     (node colour, r+3) — fires on node.is_focus
-//    f. high-risk country ring  (RETIRED in this PR — was dashed orange r+5)
-//    g. pep/sanctions ring      (red or violet, r+1) — node.pep / .sanctions
-//    h. diff status ring        (green/red, r+4) — Part 11 _diffStatus
-//    i. selection ring          (blue, r+7) — selected single click
-//    j. multi-select ring       (amber, r+5) — node in multiSelectedIds
-//    k. annotation pin          (yellow, top-left) — Part 12
-//    l. risk-score badge        (RETIRED in this PR)
-//    The layering puts behavioural / risk signals INSIDE the selection
-//    and multi-select rings on purpose — those interaction signals are
-//    always the outermost cue so the analyst's current focus dominates.
+//    a. body fill            (circle for entities, rounded-square for ACCOUNT)
+//    b. hub ring             (violet, r+4) — PhaseB CP w/ shared ≥ threshold
+//    c. sanctions ring       (red,    r+1) — risk_indicators.sanctions_hit
+//    d. focus halo           (node colour, r+3) — node.is_focus
+//    e. pep/sanctions ring   (red or violet, r+1) — node.pep / .sanctions
+//    f. diff status ring     (green/red, r+4) — Part 11 _diffStatus
+//    g. selection ring       (blue, r+7) — selected single click
+//    h. multi-select ring    (amber, r+5) — node in multiSelectedIds
+//    i. annotation pin       (yellow, top-left) — Part 12
+//    Retired in this layer: cluster halo (overlay was useless on
+//    dense graphs), high-risk-country dashed ring (now encoded in
+//    fill colour), Phase A "?" badge, risk-score badge.
 //
 // 4) ORANGE FILL  (NOW TWO-TIER.)
 //    Previously: a single `if (phaseB && node.is_high_risk_counterparty)
@@ -71,22 +68,22 @@
 //            node.ofac_flagged, node.is_high_risk_country (legacy fallback
 //            on customer nodes).
 //
-// 5) SHAPE CHOICE (Phase A vs Phase B).
-//    Previously: phaseB → diamond; everything else (including Phase A
-//    counterparties) → circle. After this PR ALL counterparties render
-//    as diamonds; Phase A (no counterparty_id) get a small grey "?"
-//    badge in the upper-right corner instead of a separate shape. The
-//    per-node Phase check uses `isPhaseBCounterparty(node)` from
-//    graphHelpers (which reads `node.is_counterparty && node.counterparty_id`)
-//    — Phase A = `node.is_counterparty && !node.counterparty_id`.
+// 5) SHAPE CHOICE.
+//    Final state after the follow-up cleanup: ALL entity nodes render
+//    as circles. Only ACCOUNT keeps a distinct shape (rounded square)
+//    because it's a container, not an entity. The Phase A vs Phase B
+//    distinction is no longer visible on the canvas — the tooltip
+//    still reports identity status on hover, but the canvas treats
+//    every counterparty uniformly. Fill colour does the work:
+//      orange = PEP/sanctions/OFAC, amber = high-risk jurisdiction,
+//      gold = standard counterparty.
 //
-// 6) LEGEND  (data-driven, rebuilt in this PR.)
-//    GraphLegend is a static JSX block at the bottom of this file. It
-//    used to render two columns (Node types + Ring indicators) via
-//    LegendDot / LegendRing helpers. After this PR it has THREE sections
-//    (Node types, Ring indicators, Fill colours), each driven by an
-//    inline data array, and uses inline-styled <div> shapes to mirror
-//    the actual canvas shapes (rotated square for diamond, etc.).
+// 6) LEGEND.
+//    Three sections (Node types, Ring indicators, Fill colours), each
+//    driven by an inline data array. All swatches are circles (with
+//    a single rounded-square for the Account row). The "Currently
+//    selected node" ring entry was removed — the blue ring is a
+//    transient interaction cue, not a permanent legend concern.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { lazy, Suspense, useEffect, useState } from 'react';
@@ -135,8 +132,6 @@ export default function GraphCanvas({
   // "Network hub (shared by N+)" label always agrees with the actual ring.
   hubRingThreshold = 5,
   annotationsByKey = null,
-  clusterByNodeId = null,
-  colorByClusterId = null,
   // Overlay state
   filter,
   filterReset,
@@ -206,7 +201,7 @@ export default function GraphCanvas({
             backgroundColor="#F8FAFC"
             nodeRelSize={5}
             nodeCanvasObject={(node, ctx, globalScale) =>
-              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId, hubRingThreshold)
+              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, hubRingThreshold)
             }
             nodePointerAreaPaint={(node, color, ctx) => {
               ctx.fillStyle = color;
@@ -249,9 +244,15 @@ export default function GraphCanvas({
             onNodeDragEnd={(node) => { node.fx = node.x; node.fy = node.y; }}
             onNodeRightClick={onNodeContext}
             cooldownTicks={200}
-            warmupTicks={80}
+            warmupTicks={120}
             d3VelocityDecay={0.4}
-            d3AlphaDecay={0.02}
+            d3AlphaDecay={0.025}
+            // Frame the network as soon as the simulation settles.
+            // Replaces the old setTimeout-based zoomToFit which was
+            // racing the layout on dense graphs.
+            onEngineStop={() => {
+              try { fgRef.current?.zoomToFit(400, 120); } catch (_) { /* ignore */ }
+            }}
           />
         </Suspense>
       )}
@@ -502,7 +503,7 @@ function linkTouchesSelected(link, selected) {
 }
 
 // ─── Custom node draw ───────────────────────────────────────────────────
-function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, clusterByNodeId, colorByClusterId, hubRingThreshold = 5) {
+function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey, hubRingThreshold = 5) {
   // Counterparty fill (two-tier, post visual-cleanup PR):
   //   PEP / sanctions / OFAC  → #F97316 orange (strong)
   //   high-risk jurisdiction only → #D97706 amber (moderate)
@@ -549,39 +550,18 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  // Cluster halo (Part 16). A soft, tinted disc behind the node body
-  // reveals the community structure without competing with the
-  // selection / focus / sanctions rings drawn later.
-  if (clusterByNodeId && colorByClusterId) {
-    const cid = clusterByNodeId.get(node.id);
-    if (cid != null) {
-      const color = colorByClusterId.get(cid);
-      if (color) {
-        ctx.save();
-        ctx.globalAlpha = alpha * 0.22;
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, r + 8, 0, 2 * Math.PI, false);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.restore();
-      }
-    }
-  }
+  // (Cluster halo retired per follow-up UX feedback — the connected-
+  // component algorithm painted every reachable node in a single hue
+  // on dense hub-and-spoke networks, communicating nothing.)
 
-  // Body. ALL counterparties (Phase A + B) are drawn as a rotated square
-  // (diamond) — Phase A used to render as a circle, which collided with
-  // customer nodes. The Phase A distinction is preserved via a small "?"
-  // corner badge drawn further down. ACCOUNT nodes use a rounded square
-  // (structural, not behavioural); everything else is a circle.
+  // Body. All entity nodes (PERSON / COMPANY / counterparty / SAR) draw
+  // as a circle. ACCOUNT keeps its rounded square because it's a
+  // structural container, not a behavioural entity. The diamond shape
+  // for counterparties was retired per follow-up UX feedback — fill
+  // colour and rings carry the type/risk signal instead.
   const isAccount = node.type === 'ACCOUNT';
   ctx.beginPath();
-  if (isCounterparty) {
-    ctx.moveTo(node.x,     node.y - r);
-    ctx.lineTo(node.x + r, node.y);
-    ctx.lineTo(node.x,     node.y + r);
-    ctx.lineTo(node.x - r, node.y);
-    ctx.closePath();
-  } else if (isAccount) {
+  if (isAccount) {
     // Rounded square. Closed account → dimmer fill + dashed border.
     const halfR = r;
     if (typeof ctx.roundRect === 'function') {
@@ -683,31 +663,9 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.stroke();
   }
 
-  // Phase A "?" corner badge — identity-not-confirmed marker. Phase A
-  // counterparties are string-matched (no counterparty_id FK) so the
-  // analyst should see a small, ambient signal that two same-named
-  // strings might or might not actually be the same entity. Drawn in
-  // the upper-right corner; Phase B nodes have no badge.
-  if (phaseA && globalScale >= 0.5) {
-    const badgeR = Math.max(4, r * 0.28);
-    const bx = node.x + r * 0.7;
-    const by = node.y - r * 0.7;
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(bx, by, badgeR, 0, 2 * Math.PI, false);
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fill();
-    ctx.lineWidth = 0.8;
-    ctx.strokeStyle = '#9CA3AF';            // gray-400
-    ctx.stroke();
-    const f = Math.max(5, badgeR * 1.1);
-    ctx.font = `bold ${f}px Inter, sans-serif`;
-    ctx.fillStyle = '#6B7280';              // gray-500
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('?', bx, by);
-    ctx.restore();
-  }
+  // (Phase A "?" badge retired per follow-up UX feedback — the per-node
+  // identity status still surfaces in the hover tooltip, but no longer
+  // adds a corner glyph that doubled the visual count on every node.)
 
   // Annotation pin — small yellow square in the upper-left of any node
   // that has at least one pinned note for the current alert. Drawn
@@ -875,19 +833,17 @@ function GraphLegend({ open, onToggle, hubRingThreshold = 5 }) {
   // (counterparty), rounded-square (account). The diamond swatch is
   // a rotated <div> so the legend always mirrors the actual node draw.
   const nodeTypes = [
-    { shape: 'diamond',     color: COLORS.COMPANY,         label: 'Company / Counterparty (identity verified)' },
-    { shape: 'diamond',     color: COLORS.COMPANY,         label: 'Company / Counterparty (string-matched, not verified)', badge: '?' },
-    { shape: 'diamond',     color: '#D97706',              label: 'Counterparty (high-risk jurisdiction)' },
-    { shape: 'diamond',     color: '#F97316',              label: 'Counterparty (PEP / sanctions / OFAC match)' },
-    { shape: 'circle',      color: COLORS.PERSON,          label: 'Person (customer)' },
-    { shape: 'circle',      color: COLORS.SAR,             label: 'SAR Filing' },
-    { shape: 'rounded',     color: COLORS.ACCOUNT,         label: 'Account' }
+    { shape: 'circle',  color: COLORS.PERSON,  label: 'Person (customer)' },
+    { shape: 'circle',  color: COLORS.COMPANY, label: 'Company / Counterparty' },
+    { shape: 'circle',  color: '#D97706',      label: 'Counterparty (high-risk jurisdiction)' },
+    { shape: 'circle',  color: '#F97316',      label: 'Counterparty (PEP / sanctions / OFAC)' },
+    { shape: 'circle',  color: COLORS.SAR,     label: 'SAR Filing' },
+    { shape: 'rounded', color: COLORS.ACCOUNT, label: 'Account' }
   ];
   const ringIndicators = [
     { color: '#DC2626', label: 'Sanctions match' },
     { color: '#7C3AED', label: 'PEP flag' },
-    { color: '#7C3AED', label: `Network hub (shared by ${hubRingThreshold}+ customers)` },
-    { color: '#3B82F6', label: 'Currently selected node' }
+    { color: '#7C3AED', label: `Network hub (shared by ${hubRingThreshold}+ customers)` }
   ];
   const fillColours = [
     { color: COLORS.COMPANY, label: 'Standard counterparty' },
@@ -933,7 +889,7 @@ function GraphLegend({ open, onToggle, hubRingThreshold = 5 }) {
           <div>
             <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Fill colours</div>
             {fillColours.map((f, i) => (
-              <LegendShape key={i} shape="diamond" color={f.color} label={f.label} />
+              <LegendShape key={i} shape="circle" color={f.color} label={f.label} />
             ))}
           </div>
         </div>
@@ -942,51 +898,19 @@ function GraphLegend({ open, onToggle, hubRingThreshold = 5 }) {
   );
 }
 
-// Renders the legend swatch for a node — circle / diamond / rounded square —
-// at canvas-equivalent visual weight. Diamond is a rotated <div>; the "?"
-// badge is overlaid as a tiny grey circle in the corner, matching the
-// canvas drawing in drawNode for Phase A counterparties.
-function LegendShape({ shape = 'circle', color, label, badge }) {
+// Renders the legend swatch for a node — circle (default) or rounded
+// square (account). All entity nodes use a circle now; ACCOUNT alone
+// uses the rounded variant because it represents a container, not an
+// entity.
+function LegendShape({ shape = 'circle', color, label }) {
   const size = 10;
-  let body;
-  if (shape === 'diamond') {
-    body = (
-      <span
-        className="inline-block shrink-0"
-        style={{
-          width: size, height: size, backgroundColor: color,
-          transform: 'rotate(45deg)', borderRadius: 1
-        }}
-      />
-    );
-  } else if (shape === 'rounded') {
-    body = (
-      <span
-        className="inline-block shrink-0 rounded-sm"
-        style={{ width: size, height: size, backgroundColor: color }}
-      />
-    );
-  } else {
-    body = (
-      <span
-        className="inline-block shrink-0 rounded-full"
-        style={{ width: size, height: size, backgroundColor: color }}
-      />
-    );
-  }
+  const cls = shape === 'rounded' ? 'rounded-sm' : 'rounded-full';
   return (
     <div className="inline-flex items-center gap-1.5 mr-3 mb-0.5 w-full">
-      <span className="relative inline-flex items-center justify-center" style={{ width: 14, height: 14 }}>
-        {body}
-        {badge && (
-          <span
-            className="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center bg-white border border-gray-400 text-gray-500 font-bold leading-none"
-            style={{ width: 7, height: 7, borderRadius: 4, fontSize: 6 }}
-          >
-            {badge}
-          </span>
-        )}
-      </span>
+      <span
+        className={`inline-block shrink-0 ${cls}`}
+        style={{ width: size, height: size, backgroundColor: color }}
+      />
       <span className="text-slate-700">{label}</span>
     </div>
   );
