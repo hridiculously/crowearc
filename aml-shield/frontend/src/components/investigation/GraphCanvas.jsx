@@ -47,16 +47,16 @@
 //
 // 3) RING-DRAW SEQUENCE (top of drawNode → bottom; later = visually outer):
 //    a. body fill            (circle for entities, rounded-square for ACCOUNT)
-//    b. sanctions ring       (red,    r+1) — risk_indicators.sanctions_hit
-//    c. focus halo           (node colour, r+3) — node.is_focus
-//    d. pep/sanctions ring   (red or violet, r+1) — node.pep / .sanctions
-//    e. diff status ring     (green/red, r+4) — Part 11 _diffStatus
-//    f. selection ring       (blue, r+7) — selected single click
-//    g. multi-select ring    (amber, r+5) — node in multiSelectedIds
-//    h. annotation pin       (yellow, top-left) — Part 12
-//    Retired in this layer: hub ring (background texture on dense
-//    graphs), cluster halo, high-risk-country dashed ring (now in
-//    fill colour), Phase A "?" badge, risk-score badge.
+//    b. focus halo           (node colour, r+3) — node.is_focus
+//    c. sanctions ring       (#E24B4A, r+3) — sanctions / OFAC signal
+//    d. pep ring             (#7C3AED, r+3 alone, r+6 when stacked over
+//                             sanctions) — pep / risk_indicators.pep
+//    That is the entire on-canvas ring set. Selection feedback comes
+//    from the right panel populating; multi-select staged state shows
+//    up in the right-panel chip list and the toolbar banner.
+//    Retired layers: diff-status ring, selection ring, multi-select
+//    ring, annotation pin, risk-score badge, Phase A "?" badge, hub
+//    ring, cluster halo, high-risk-country dashed ring.
 //
 // 4) ORANGE FILL  (NOW TWO-TIER.)
 //    Previously: a single `if (phaseB && node.is_high_risk_counterparty)
@@ -203,7 +203,7 @@ export default function GraphCanvas({
             backgroundColor="#F8FAFC"
             nodeRelSize={5}
             nodeCanvasObject={(node, ctx, globalScale) =>
-              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey)
+              drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency)
             }
             nodePointerAreaPaint={(node, color, ctx) => {
               ctx.fillStyle = color;
@@ -245,13 +245,12 @@ export default function GraphCanvas({
             onLinkHover={(link) => setHoveredLink(link || null)}
             onNodeDragEnd={(node) => { node.fx = node.x; node.fy = node.y; }}
             onNodeRightClick={onNodeContext}
-            // CHANGE-1 target: simulation budget. warmupTicks=120
-            // runs 120 ticks invisibly before the first paint so
-            // the analyst never sees a mid-simulation cluster.
-            // cooldownTicks=0 stops the animated cool-down after
-            // the warmup completes — there's nothing to refine
-            // since the layout is already settled.
-            warmupTicks={120}
+            // Simulation budget. warmupTicks=150 runs 150 ticks
+            // invisibly before the first paint so the analyst
+            // never sees a mid-simulation cluster. cooldownTicks=0
+            // stops the animated cool-down — by the time the
+            // canvas paints, the layout is already settled.
+            warmupTicks={150}
             cooldownTicks={0}
             // Frame the network when the simulation settles.
             onEngineStop={() => {
@@ -496,7 +495,7 @@ function linkTouchesSelected(link, selected) {
 }
 
 // ─── Custom node draw ───────────────────────────────────────────────────
-function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, multiSelectedIds, annotationsByKey) {
+function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency) {
   // Counterparty fill (two-tier, post visual-cleanup PR):
   //   PEP / sanctions / OFAC  → #F97316 orange (strong)
   //   high-risk jurisdiction only → #D97706 amber (moderate)
@@ -579,21 +578,11 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.setLineDash([]);
   }
 
-  // (Hub ring retired per follow-up UX feedback — in dense networks
-  // the violet ring fired on most counterparties and read as
-  // background texture rather than signal. Node size is now the
-  // hub indicator: high-volume counterparties have a larger radius
-  // via radiusFor's log-scaling of txn_count. The right panel still
-  // surfaces a "⚠ Network hub" text warning at the same threshold.)
-
-  // Sanctions hazard ring (Phase B counterparties from risk_indicators).
-  if (phaseB && node.risk_indicators?.sanctions_hit) {
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 1, 0, 2 * Math.PI, false);
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = '#DC2626';
-    ctx.stroke();
-  }
+  // ─── Ring stack (only sanctions + PEP + focus halo) ─────────────
+  // Spec restricts on-canvas rings to two risk signals plus the focus
+  // halo. The diff-status, selection, and multi-select rings were
+  // retired here — the right-panel populating on click and the toolbar
+  // banner for multi-select mode carry that information instead.
 
   // Focus halo (subtle outer ring on the root entity)
   if (node.is_focus) {
@@ -604,86 +593,36 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency, mult
     ctx.stroke();
   }
 
-  // (High-risk-country dashed orange ring retired in the visual-cleanup
-  // PR — see PRE-PR AUDIT note 4. High-risk jurisdiction is now encoded
-  // in the counterparty FILL colour (amber) so the indicator no longer
-  // competes with the sanctions/PEP rings for the third visual channel.)
-  if (node.pep || node.sanctions) {
+  // Sanctions ring at r+3. Fires on any sanctions / OFAC signal.
+  const hasSanctions = !!(
+    node.sanctions ||
+    node.risk_indicators?.sanctions_hit ||
+    node.ofac_flagged
+  );
+  if (hasSanctions) {
     ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 1, 0, 2 * Math.PI, false);
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = node.sanctions ? '#DC2626' : '#7C3AED';
-    ctx.stroke();
-  }
-
-  // Diff status ring (Part 11). Drawn outside the focus halo but
-  // inside the selection ring so single-select still overrides
-  // visually. 'added' = green, 'removed' = red dashed.
-  if (node._diffStatus === 'added' || node._diffStatus === 'removed') {
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI, false);
+    ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI, false);
     ctx.lineWidth = 2;
-    ctx.strokeStyle = node._diffStatus === 'added' ? '#10B981' : '#DC2626';
-    if (node._diffStatus === 'removed') ctx.setLineDash([3, 2]);
+    ctx.strokeStyle = '#E24B4A';
     ctx.stroke();
-    ctx.setLineDash([]);
   }
 
-  // Selection ring (blue, outermost)
-  if (selected && selected.id === node.id) {
+  // PEP ring at r+6 when stacked over sanctions, otherwise at r+3.
+  const hasPep = !!(node.pep || node.risk_indicators?.pep);
+  if (hasPep) {
+    const pepR = hasSanctions ? r + 6 : r + 3;
     ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 7, 0, 2 * Math.PI, false);
+    ctx.arc(node.x, node.y, pepR, 0, 2 * Math.PI, false);
     ctx.lineWidth = 2;
-    ctx.strokeStyle = '#3B82F6';
+    ctx.strokeStyle = '#7C3AED';
     ctx.stroke();
   }
 
-  // Multi-select ring (amber). Shown when this node is one of the
-  // analyst's multi-selected set — separate visual from the single-
-  // node blue selection ring above.
-  if (multiSelectedIds && multiSelectedIds.has && multiSelectedIds.has(node.id)) {
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 5, 0, 2 * Math.PI, false);
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = '#F59E0B';
-    ctx.stroke();
-  }
-
-  // (Phase A "?" badge retired per follow-up UX feedback — the per-node
-  // identity status still surfaces in the hover tooltip, but no longer
-  // adds a corner glyph that doubled the visual count on every node.)
-
-  // Annotation pin — small yellow square in the upper-left of any node
-  // that has at least one pinned note for the current alert. Drawn
-  // before the risk-score badge so they don't collide visually.
-  const annotations = annotationsByKey?.get?.(node.id);
-  if (annotations && annotations.length > 0 && globalScale >= 0.5) {
-    const pinR = Math.max(4, Math.min(6, r * 0.45));
-    const px = node.x - r + 1;
-    const py = node.y - r + 1;
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(px, py, pinR, 0, 2 * Math.PI, false);
-    ctx.fillStyle = '#FACC15';   // amber-400
-    ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-    ctx.stroke();
-    if (annotations.length > 1 && globalScale >= 1.0) {
-      const f = Math.max(7, 8 / globalScale);
-      ctx.font = `bold ${f}px Inter, sans-serif`;
-      ctx.fillStyle = '#92400E';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(String(annotations.length), px, py);
-    }
-    ctx.restore();
-  }
-
-  // (Risk-score badge retired in the visual-cleanup PR — see PRE-PR AUDIT
-  // note 1. The numeric score still appears in the right panel's
-  // RiskScoreBar; the canvas no longer stacks a redundant red disc on
-  // top of the fill + rings.)
+  // (Retired in this revision: diff-status ring, selection ring,
+  // multi-select ring, annotation pin, risk-score badge, Phase A "?"
+  // badge, hub ring, high-risk-country ring. The canvas now carries
+  // exactly two risk signals: sanctions and PEP. Everything else is
+  // a per-node fill colour decision (Change 2 from the spec).)
 
   // Label rules.
   const isSelected = selected && selected.id === node.id;
@@ -821,19 +760,14 @@ function GraphLegend({ open, onToggle }) {
   const nodeTypes = [
     { shape: 'circle',  color: COLORS.PERSON,  label: 'Person (customer)' },
     { shape: 'circle',  color: COLORS.COMPANY, label: 'Company / Counterparty' },
-    { shape: 'circle',  color: '#D97706',      label: 'Counterparty (high-risk jurisdiction)' },
-    { shape: 'circle',  color: '#F97316',      label: 'Counterparty (PEP / sanctions / OFAC)' },
+    { shape: 'circle',  color: '#D97706',      label: 'Counterparty — high-risk jurisdiction' },
+    { shape: 'circle',  color: '#F97316',      label: 'Counterparty — PEP / Sanctions / OFAC' },
     { shape: 'circle',  color: COLORS.SAR,     label: 'SAR Filing' },
     { shape: 'rounded', color: COLORS.ACCOUNT, label: 'Account' }
   ];
-  const ringIndicators = [
-    { color: '#DC2626', label: 'Sanctions match' },
+  const riskRings = [
+    { color: '#E24B4A', label: 'Sanctions match' },
     { color: '#7C3AED', label: 'PEP flag' }
-  ];
-  const fillColours = [
-    { color: COLORS.COMPANY, label: 'Standard counterparty' },
-    { color: '#D97706',      label: 'High-risk jurisdiction' },
-    { color: '#F97316',      label: 'PEP / Sanctions / OFAC match' }
   ];
 
   return (
@@ -845,7 +779,7 @@ function GraphLegend({ open, onToggle }) {
         borderRadius: 8,
         padding: open ? '10px 14px' : '6px 10px',
         boxShadow: '0 4px 16px rgba(15, 23, 42, 0.08)',
-        maxWidth: 420
+        maxWidth: 360
       }}
     >
       <button
@@ -858,7 +792,7 @@ function GraphLegend({ open, onToggle }) {
         <span className="font-semibold uppercase tracking-wider text-[10px]">Legend</span>
       </button>
       {open && (
-        <div className="mt-2 grid grid-cols-3 gap-x-5 gap-y-1.5">
+        <div className="mt-2 grid grid-cols-2 gap-x-5 gap-y-1.5">
           <div>
             <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Node types</div>
             {nodeTypes.map((n, i) => (
@@ -866,15 +800,9 @@ function GraphLegend({ open, onToggle }) {
             ))}
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Ring indicators</div>
-            {ringIndicators.map((r, i) => (
+            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Risk rings</div>
+            {riskRings.map((r, i) => (
               <LegendRing key={i} color={r.color} label={r.label} />
-            ))}
-          </div>
-          <div>
-            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Fill colours</div>
-            {fillColours.map((f, i) => (
-              <LegendShape key={i} shape="circle" color={f.color} label={f.label} />
             ))}
           </div>
         </div>

@@ -231,18 +231,12 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
 
       // ── 2. Force config (spec recipe) ───────────────────────
       const chargeForce = fgRef.current.d3Force('charge');
-      if (chargeForce) chargeForce.strength(-600);
+      if (chargeForce) chargeForce.strength(-800);
       const linkForce = fgRef.current.d3Force('link');
-      if (linkForce) {
-        linkForce.distance(link => {
-          if (link.type === 'TRANSACTS_WITH') return 160;
-          if (link.type === 'CO_OCCURS_WITH') return 200;
-          return 140;
-        });
-      }
+      if (linkForce) linkForce.distance(() => 180);
       fgRef.current.d3Force(
         'collision',
-        forceCollide(n => radiusFor(n) + 18)
+        forceCollide(n => radiusFor(n) + 20)
       );
       if (typeof fgRef.current.d3ReheatSimulation === 'function') {
         fgRef.current.d3ReheatSimulation();
@@ -252,12 +246,13 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
 
   // Auto-fit safety net — falls back if ForceGraph's
   // onEngineStop signal doesn't fire (some library builds skip
-  // it on tiny graphs). Aligned to the spec's 2s budget.
+  // it on tiny graphs). 2200ms matches the larger warmupTicks
+  // budget from the latest spec.
   useEffect(() => {
     if (!fgRef.current || !data) return;
     const t = setTimeout(() => {
       try { fgRef.current.zoomToFit(400, 140); } catch (_) { /* ignore */ }
-    }, 2000);
+    }, 2200);
     return () => clearTimeout(t);
   }, [data]);
 
