@@ -223,13 +223,16 @@ export default function GraphCanvas({
               if (!showEdgeLabels) return;
               drawLinkLabel(link, ctx, globalScale, selected);
             }}
-            // Money-flow direction. Larger arrows (6px) sit at the
+            // Money-flow direction. The arrow head sits near the
             // target end so the eye lands on the receiving entity.
-            // Particles animate in the same direction; their count
-            // is log-scaled to txn_count so high-volume edges shimmer.
-            // Bidirectional flows get two particles.
-            linkDirectionalArrowLength={(l) => l.type === 'TRANSACTS_WITH' ? 6 : 3}
-            linkDirectionalArrowRelPos={0.92}
+            // Sizes are world-space — they scale with zoom, so the
+            // arrow shrinks when you zoom out but stays readable
+            // at the default fit-to-view. Doubled from the previous
+            // 6/3 sizing after analyst feedback that the arrows
+            // were unreadable without manual zoom-in.
+            linkDirectionalArrowLength={(l) => l.type === 'TRANSACTS_WITH' ? 12 : 7}
+            linkDirectionalArrowColor={(l) => l.alerted ? '#DC2626' : '#475569'}
+            linkDirectionalArrowRelPos={0.88}
             linkDirectionalParticles={(l) => {
               if (l.type !== 'TRANSACTS_WITH') return 0;
               if (l.direction === 'bidirectional') return 2;
