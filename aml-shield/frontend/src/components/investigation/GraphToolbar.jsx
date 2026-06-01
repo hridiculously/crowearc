@@ -32,7 +32,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
-  Tag, CreditCard,
+  Tag, CreditCard, Shuffle,
   Filter, Calendar,
   MousePointer2, Camera, Download, Bookmark
 } from 'lucide-react';
@@ -55,6 +55,10 @@ export default function GraphToolbar({
       {/* Group 1 — View toggles. */}
       <Btn icon={Tag}        active={state.showEdgeLabels}    onClick={click('toggleEdgeLabels')}    title="Toggle edge labels" />
       <Btn icon={CreditCard} active={state.showAccountNodes}  onClick={click('toggleAccountNodes')}  title="Show account nodes" />
+      {/* Re-layout — analyst escape valve when the default seed produces
+          a layout that doesn't suit the network shape. Each press
+          re-runs the simulation from a fresh rotation. */}
+      <Btn icon={Shuffle}    onClick={click('relayout')}      title="Re-layout the graph" />
 
       <Divider />
 

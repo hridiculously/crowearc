@@ -22,7 +22,7 @@
 // hook or in GraphCanvas / GraphRightPanel — not here.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, ZoomIn, ZoomOut, Maximize2, Network } from 'lucide-react';
 import GraphCanvas from './GraphCanvas.jsx';
 import GraphRightPanel from './GraphRightPanel.jsx';
@@ -149,6 +149,23 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
   // (Counterparty count + cluster overlay retired with the Sankey
   // and Cluster Mode toolbar buttons.)
 
+  // ── Re-layout counter. Bumped by the "Re-layout" toolbar action; on
+  //    bump we clear every node's x/y so the pre-seed effect runs again
+  //    with a fresh rotation. Each press lands the analyst on a different
+  //    (also-readable) layout — the escape valve when the default seed
+  //    doesn't suit their network shape.
+  const [layoutRev, setLayoutRev] = useState(0);
+  const requestRelayout = useCallback(() => {
+    if (data?.nodes) {
+      for (const n of data.nodes) {
+        n.x = null; n.y = null;
+        n.fx = null; n.fy = null;
+        n.vx = 0; n.vy = 0;
+      }
+    }
+    setLayoutRev(r => r + 1);
+  }, [data]);
+
   // ── Saved-view indicator (refreshes on rev bump + customer change). ─
   const hasSavedView = useMemo(
     () => readSavedViews(currentCustomerId).length > 0,
@@ -196,6 +213,10 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     if (!fgRef.current || !data?.nodes) return;
     try {
       // ── 1. Pre-seed deterministic radial positions ──────────
+      // Rotation offset is layoutRev-dependent — re-running Re-layout
+      // bumps the rev and re-seeds with a different start angle so
+      // each press lands the analyst on a visually different (also
+      // readable) layout.
       const focus = data.nodes.find(n => n.is_focus);
       const others = data.nodes.filter(n => !n.is_focus);
       const seedDone = (focus && focus.x != null) || others.some(n => n.x != null);
@@ -203,20 +224,20 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
         if (focus) { focus.x = 0; focus.y = 0; }
         const counterparties = others.filter(n => n.is_counterparty);
         const customers      = others.filter(n => !n.is_counterparty);
-        // Inner ring — counterparties. Radius scales with count so a
-        // 6-CP graph and a 20-CP graph both have similar gaps.
+        // Rotation offset cycles through irrational multiples of π so
+        // each Re-layout press lands on a visibly distinct angle, not
+        // a rotation by a round fraction that the eye would read as
+        // "the same layout, just spun."
+        const rotOffset = layoutRev * 1.1357;
         const innerR = Math.max(180, counterparties.length * 24);
         counterparties.forEach((n, i) => {
-          const a = (i / Math.max(counterparties.length, 1)) * 2 * Math.PI;
+          const a = (i / Math.max(counterparties.length, 1)) * 2 * Math.PI + rotOffset;
           n.x = Math.cos(a) * innerR;
           n.y = Math.sin(a) * innerR;
         });
-        // Outer ring — neighbour customers (CO_OCCURS_WITH links).
-        // Offset rotation by 0.5rad so they interleave the gaps in
-        // the inner ring rather than aligning radially.
         const outerR = innerR + 160;
         customers.forEach((n, i) => {
-          const a = (i / Math.max(customers.length, 1)) * 2 * Math.PI + 0.5;
+          const a = (i / Math.max(customers.length, 1)) * 2 * Math.PI + 0.5 + rotOffset;
           n.x = Math.cos(a) * outerR;
           n.y = Math.sin(a) * outerR;
         });
@@ -235,7 +256,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
         fgRef.current.d3ReheatSimulation();
       }
     } catch (_) { /* older lib versions may not expose d3Force */ }
-  }, [data]);
+  }, [data, layoutRev]);
 
   // Auto-fit safety net — falls back if ForceGraph's
   // onEngineStop signal doesn't fire (some library builds skip
@@ -405,6 +426,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
       case 'toggleAccountNodes': setShowAccountNodes(v => !v); break;
       // case 'toggleClusters': retired — see import-block note.
       // toggleFlowView retired with the Sankey view.
+      case 'relayout':           requestRelayout(); break;
       case 'openEdgeFilter':     openOne(edgeFilterOpen  ? null : 'edgeFilter');  break;
       case 'openTimeWindow':     openOne(timeWindowOpen  ? null : 'timeWindow');  break;
       case 'toggleMultiSelect':

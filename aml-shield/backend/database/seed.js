@@ -579,6 +579,17 @@ ${s.narrative_summary}
         [running, account.account_number]);
     }
 
+    // CCEG fixture customers (dense / hub / chain topologies). Self-
+    // contained — adds 3 focus + 28 neighbour customers + their txns,
+    // without alerts or SARs. Used by /docs/cceg-acceptance/ acceptance
+    // checks; safe to skip if the file isn't present.
+    try {
+      const { seedCcegFixtures } = require('./seed_cceg_fixtures.js');
+      await seedCcegFixtures(client, rng, { iso, addDays, REFERENCE_DATE });
+    } catch (err) {
+      console.warn('[seed] cceg fixtures skipped:', err.message);
+    }
+
     // Users + manager defaults (replaces seedAdminDataIfEmpty)
     const namesSet = new Set();
     for (const a of alertRows) if (a.assigned_to) namesSet.add(a.assigned_to);

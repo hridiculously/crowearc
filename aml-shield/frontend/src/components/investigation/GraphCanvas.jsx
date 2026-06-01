@@ -243,12 +243,14 @@ export default function GraphCanvas({
             onLinkHover={(link) => setHoveredLink(link || null)}
             onNodeDragEnd={(node) => { node.fx = node.x; node.fy = node.y; }}
             onNodeRightClick={onNodeContext}
-            // Simulation budget. warmupTicks=150 runs 150 ticks
+            // Simulation budget. warmupTicks=250 runs 250 ticks
             // invisibly before the first paint so the analyst
-            // never sees a mid-simulation cluster. cooldownTicks=0
-            // stops the animated cool-down — by the time the
-            // canvas paints, the layout is already settled.
-            warmupTicks={150}
+            // never sees a mid-simulation cluster. Increased from
+            // 150 → 250 to cover denser fixtures (40+ counterparty
+            // networks) where the extra iterations let collide +
+            // charge resolve fully before paint. cooldownTicks=0
+            // stops the animated cool-down.
+            warmupTicks={250}
             cooldownTicks={0}
             // Frame the network when the simulation settles.
             onEngineStop={() => {
