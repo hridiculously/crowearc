@@ -627,11 +627,14 @@ function drawNode(node, ctx, globalScale, selected, hoveredNode, adjacency) {
   // exactly two risk signals: sanctions and PEP. Everything else is
   // a per-node fill colour decision (Change 2 from the spec).)
 
-  // Label rules.
+  // Label rules. Focus + selected always show. Everything else shows
+  // when the zoom is at or above 0.4 — that covers the default
+  // fit-to-view zoom, so every node has a name visible on open. Below
+  // 0.4 (analyst has zoomed way out) labels hide to avoid a wall of
+  // text.
   const isSelected = selected && selected.id === node.id;
   const alwaysShow = node.is_focus || isSelected;
-  const isFlagged  = node.sanctions || node.pep || node.is_high_risk_country;
-  const showLabel  = alwaysShow || (isFlagged && globalScale >= 0.7);
+  const showLabel  = alwaysShow || globalScale >= 0.4;
   if (showLabel) {
     const fontSize = Math.max(9, 11 / globalScale);
     ctx.font = `${fontSize}px Inter, sans-serif`;
