@@ -90,13 +90,12 @@
 
 import { lazy, Suspense, useEffect, useState } from 'react';
 import {
-  Network, Loader2, ChevronDown, ChevronRight, X, Trash2, GitFork
+  Network, Loader2, ChevronDown, ChevronRight, X, Trash2
 } from 'lucide-react';
 import {
   COLORS, NODE_RADIUS, radiusFor, isPhaseBCounterparty,
   truncateLabel, fmtVolumeShort, fmtMoney, shouldShowHoverLabel
 } from './graphHelpers.js';
-import GraphSankeyView from './GraphSankeyView.jsx';
 
 // Lazy-loaded so the graph library (~150KB) doesn't ship in the main bundle.
 const ForceGraph2D = lazy(() => import('react-force-graph-2d'));
@@ -147,9 +146,7 @@ export default function GraphCanvas({
   compareActive = false,
   compareWindow = null,
   compareCounts = null,
-  onClearCompare,
-  // View mode (Part 17) — 'force' (default) | 'sankey'
-  viewMode = 'force'
+  onClearCompare
 }) {
   const [legendOpen, setLegendOpen] = useState(true);
   const [hintVisible, setHintVisible] = useState(true);
@@ -191,8 +188,6 @@ export default function GraphCanvas({
             </div>
           </div>
         </Centered>
-      ) : viewMode === 'sankey' ? (
-        <GraphSankeyView displayData={displayData} size={size} />
       ) : (
         <Suspense fallback={<LoadingState />}>
           <ForceGraph2D

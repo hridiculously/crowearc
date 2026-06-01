@@ -18,8 +18,8 @@
 //                     PR (Part 6).
 //   showAccountNodes — toolbar toggle; triggers a re-fetch with
 //                     ?includeAccounts=true (Part 1b of the backend PR).
-//   showClusters    — toolbar toggle; consumed by Part 16 cluster overlay.
-//   viewMode        — 'force' (default) | 'sankey' (Part 17).
+// (Cluster Mode + Sankey Flow View toolbar features retired —
+//  showClusters / viewMode no longer carried here.)
 //
 // Setters and small action helpers are returned alongside the raw values.
 // Hooks consume only what they need.
@@ -51,8 +51,8 @@ export function useGraphFilters() {
 
   const [showEdgeLabels, setShowEdgeLabels] = useState(false);
   const [showAccountNodes, setShowAccountNodes] = useState(false);
-  const [showClusters, setShowClusters] = useState(false);
-  const [viewMode, setViewMode] = useState('force');
+  // (showClusters + viewMode state retired with the Cluster Mode and
+  // Sankey Flow View toolbar buttons.)
 
   // ── Filter actions (Tableau-style) ───────────────────────────────
   const filterKeepOnly = useCallback((nodeId) => {
@@ -145,7 +145,6 @@ export function useGraphFilters() {
     // Toolbar toggles
     showEdgeLabels, setShowEdgeLabels,
     showAccountNodes, setShowAccountNodes,
-    showClusters, setShowClusters,
-    viewMode, setViewMode
+    // (showClusters / viewMode setters dropped — features retired)
   };
 }

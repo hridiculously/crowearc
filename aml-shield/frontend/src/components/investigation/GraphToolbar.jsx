@@ -1,16 +1,11 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // GraphToolbar — the slim button strip that sits between the modal header
-// and the graph body. Ten buttons in three semantic groups, separated by
+// and the graph body. Buttons in three semantic groups, separated by
 // vertical dividers:
 //
 //   Group 1 — View toggles
 //     · Edge Labels       (Tag)         — render TRANSACTS_WITH summary on each edge
 //     · Account Nodes     (CreditCard)  — re-fetch with ?includeAccounts=true
-//     · Cluster Mode      (Layers)      — community-detection halo overlay
-//     · Flow View         (GitFork)     — switch to the Sankey view; disabled
-//                                         when there are fewer than 5
-//                                         counterparties (Sankey is unreadable
-//                                         below that)
 //
 //   Group 2 — Filters
 //     · Edge Filter       (Filter)      — opens the EdgeFilterPanel popover;
@@ -30,22 +25,24 @@
 //
 // All button presses are surfaced as `onAction(name)`. Toggle visual state
 // for each button is read off the `state` prop the parent provides.
+//
+// (Cluster Mode and Flow View / Sankey buttons retired per follow-up UX
+// feedback — clustering painted everything in dense networks and the
+// Sankey view was rejected outright.)
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
-  Tag, CreditCard, GitFork,
+  Tag, CreditCard,
   Filter, Calendar,
   MousePointer2, Camera, Download, Bookmark
 } from 'lucide-react';
 
 export default function GraphToolbar({
   state = {},
-  counterpartyCount = 0,
   activeEdgeFilterCount = 0,
   timeWindow = null,           // { from, to } or null
   onAction
 }) {
-  const flowDisabled = counterpartyCount < 5;
   const click = (name) => () => onAction && onAction(name);
 
   // Time window button shows the active range in compact "MMM d" form.
@@ -55,21 +52,9 @@ export default function GraphToolbar({
 
   return (
     <div className="border-b border-gray-200 bg-white px-3 py-1.5 flex items-center gap-1 text-slate-600">
-      {/* Group 1 — View toggles. (Cluster Mode button retired per
-          follow-up UX feedback — connected-component clustering
-          painted nearly every node in dense hub-and-spoke networks
-          so the signal was meaningless.) */}
+      {/* Group 1 — View toggles. */}
       <Btn icon={Tag}        active={state.showEdgeLabels}    onClick={click('toggleEdgeLabels')}    title="Toggle edge labels" />
       <Btn icon={CreditCard} active={state.showAccountNodes}  onClick={click('toggleAccountNodes')}  title="Show account nodes" />
-      <Btn
-        icon={GitFork}
-        active={state.viewMode === 'sankey'}
-        disabled={flowDisabled}
-        onClick={click('toggleFlowView')}
-        title={flowDisabled
-          ? 'Flow view needs at least 5 counterparties'
-          : (state.viewMode === 'sankey' ? 'Switch back to network view' : 'Switch to Sankey flow view')}
-      />
 
       <Divider />
 

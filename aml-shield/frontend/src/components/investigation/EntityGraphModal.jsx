@@ -30,7 +30,7 @@ import GraphToolbar from './GraphToolbar.jsx';
 import GraphEdgeFilterPanel from './GraphEdgeFilterPanel.jsx';
 import GraphTimeWindowPanel from './GraphTimeWindowPanel.jsx';
 import GraphSavedViewsPanel, { readSavedViews } from './GraphSavedViewsPanel.jsx';
-import GraphSankeyView from './GraphSankeyView.jsx';
+// (GraphSankeyView retired — Flow View toolbar button removed per UX feedback.)
 import { useGraphData } from './hooks/useGraphData.js';
 import { useGraphFilters } from './hooks/useGraphFilters.js';
 import { useGraphSimulation } from './hooks/useGraphSimulation.js';
@@ -61,9 +61,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     replaceMultiSelectNodes,
     subgraphFilter, setSubgraphFilter,
     showEdgeLabels, setShowEdgeLabels,
-    showAccountNodes, setShowAccountNodes,
-    showClusters, setShowClusters,
-    viewMode, setViewMode
+    showAccountNodes, setShowAccountNodes
   } = filters;
 
   const [timeWindow, setTimeWindow] = useState(null);   // { from, to } or null
@@ -148,13 +146,8 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
   const fgRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
 
-  // ── Counterparty count drives the Flow View disable threshold ──────
-  const counterpartyCount = useMemo(() => {
-    if (!data?.nodes) return 0;
-    return data.nodes.filter(n => n.is_counterparty).length;
-  }, [data]);
-
-  // (Cluster overlay retired — see EntityGraphModal import note.)
+  // (Counterparty count + cluster overlay retired with the Sankey
+  // and Cluster Mode toolbar buttons.)
 
   // ── Saved-view indicator (refreshes on rev bump + customer change). ─
   const hasSavedView = useMemo(
@@ -381,9 +374,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     edgeFilters,
     timeWindow,
     showEdgeLabels,
-    showAccountNodes,
-    showClusters,
-    viewMode
+    showAccountNodes
   });
 
   const applyViewSnapshot = (snap) => {
@@ -395,8 +386,6 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
     setTimeWindow(snap.timeWindow || null);
     setShowEdgeLabels(!!snap.showEdgeLabels);
     setShowAccountNodes(!!snap.showAccountNodes);
-    setShowClusters(!!snap.showClusters);
-    setViewMode(snap.viewMode || 'force');
     setSavedViewsOpen(false);
     setToast({ kind: 'success', text: 'View applied.' });
   };
@@ -415,7 +404,7 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
       case 'toggleEdgeLabels':   setShowEdgeLabels(v => !v); break;
       case 'toggleAccountNodes': setShowAccountNodes(v => !v); break;
       // case 'toggleClusters': retired — see import-block note.
-      case 'toggleFlowView':     setViewMode(viewMode === 'sankey' ? 'force' : 'sankey'); break;
+      // toggleFlowView retired with the Sankey view.
       case 'openEdgeFilter':     openOne(edgeFilterOpen  ? null : 'edgeFilter');  break;
       case 'openTimeWindow':     openOne(timeWindowOpen  ? null : 'timeWindow');  break;
       case 'toggleMultiSelect':
@@ -499,9 +488,8 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
         <GraphToolbar
           state={{
             showEdgeLabels, showAccountNodes,
-            viewMode, multiSelectMode, hasSavedView
+            multiSelectMode, hasSavedView
           }}
-          counterpartyCount={counterpartyCount}
           activeEdgeFilterCount={activeEdgeFilterCount}
           timeWindow={timeWindow}
           onAction={handleToolbarAction}
@@ -540,7 +528,6 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
           <GraphCanvas
             data={mergedData || data}
             displayData={displayData}
-            viewMode={viewMode}
             compareActive={!!compareWindow}
             compareWindow={compareWindow}
             compareCounts={mergedData?.meta?.compareCounts || null}
