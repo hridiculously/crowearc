@@ -26,9 +26,6 @@
 // All button presses are surfaced as `onAction(name)`. Toggle visual state
 // for each button is read off the `state` prop the parent provides.
 //
-// (Cluster Mode and Flow View / Sankey buttons retired per follow-up UX
-// feedback — clustering painted everything in dense networks and the
-// Sankey view was rejected outright.)
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {

@@ -30,7 +30,6 @@ import GraphToolbar from './GraphToolbar.jsx';
 import GraphEdgeFilterPanel from './GraphEdgeFilterPanel.jsx';
 import GraphTimeWindowPanel from './GraphTimeWindowPanel.jsx';
 import GraphSavedViewsPanel, { readSavedViews } from './GraphSavedViewsPanel.jsx';
-// (GraphSankeyView retired — Flow View toolbar button removed per UX feedback.)
 import { useGraphData } from './hooks/useGraphData.js';
 import { useGraphFilters } from './hooks/useGraphFilters.js';
 import { useGraphSimulation } from './hooks/useGraphSimulation.js';
@@ -146,8 +145,6 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
   const fgRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
 
-  // (Counterparty count + cluster overlay retired with the Sankey
-  // and Cluster Mode toolbar buttons.)
 
   // ── Re-layout counter. Bumped by the "Re-layout" toolbar action; on
   //    bump we clear every node's x/y so the pre-seed effect runs again
@@ -425,7 +422,6 @@ export default function EntityGraphModal({ customerId, customerName, alertId = n
       case 'toggleEdgeLabels':   setShowEdgeLabels(v => !v); break;
       case 'toggleAccountNodes': setShowAccountNodes(v => !v); break;
       // case 'toggleClusters': retired — see import-block note.
-      // toggleFlowView retired with the Sankey view.
       case 'relayout':           requestRelayout(); break;
       case 'openEdgeFilter':     openOne(edgeFilterOpen  ? null : 'edgeFilter');  break;
       case 'openTimeWindow':     openOne(timeWindowOpen  ? null : 'timeWindow');  break;
